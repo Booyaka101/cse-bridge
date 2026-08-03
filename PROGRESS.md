@@ -13,6 +13,21 @@ Publish-day operational notes: npm account `booyaka`, GitHub `Booyaka101`. The p
 
 Last updated: 2026-08-03
 
+## Distribution (2026-08-03)
+
+| Channel | Status |
+| --- | --- |
+| dev.to | LIVE — https://dev.to/booyaka101/google-kills-the-custom-search-json-api-on-2027-01-01-here-is-a-self-hosted-drop-in-3nk0 (4 tags, 11 code blocks) |
+| X | LIVE — https://x.com/KillKenny101/status/2084261691873742898 (957 chars + GitHub link card) |
+| r/selfhosted | LIVE in the weekly New Project Megathread — https://old.reddit.com/r/selfhosted/comments/1vb7psc/new_project_megathread_week_of_30_jul_2026/p1g1hof/ |
+| Hacker News | NOT DONE — see below |
+
+**The README's "post to the HN shutdown thread" advice is dead.** HN archives threads after ~14 days, and `item?id=48942250` is archived (no comment form). The live route is a Show HN, but the `Booyaka101` HN account has **3 karma** and `/submit` bounces with "You're posting too fast" (`fnop=story-toofast`) — needs aged karma or an owner-driven submission. Worth editing the README's distribution section accordingly.
+
+**r/selfhosted rule 6:** standalone new-project posts are removed (the first attempt was, by u/asimovs-auditor) — projects must go in the weekly "New Project Megathread". Note the Reddit account has 1 karma and old.reddit's `/submit` serves it a reCAPTCHA challenge; new-reddit's composer works.
+
+Post drafts kept at `D:\tmp\cse-marketing\content\` (devto.md, x.txt, reddit.md, reddit-megathread.md).
+
 ## Pre-publish cold-start verification (2026-08-03, second pass)
 
 Simulated a stranger's fresh clone: copied ONLY the repo files (no `.env`, `node_modules`, `dist`, `verify/`) to a temp dir, then:
