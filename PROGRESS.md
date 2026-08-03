@@ -1,13 +1,15 @@
 # PROGRESS — cse-bridge
 
-**Status: v1.0.1 PUBLISHED (2026-08-03). All 8 ship-bar points met.**
+**Status: v1.0.2 PUBLISHED (2026-08-03). All 8 ship-bar points met.**
 
 - GitHub: https://github.com/Booyaka101/cse-bridge (public, CI green — the `live` job runs the full compose stack on the runner)
-- npm: `cse-bridge@1.0.1` (https://www.npmjs.com/package/cse-bridge) — verified by installing from the registry and serving real traffic
-- GHCR: `ghcr.io/booyaka101/cse-bridge` `:1.0.1` `:1.0` `:1` `:latest`, multi-arch amd64+arm64, public — verified by anonymous pull + run
-- Release: https://github.com/Booyaka101/cse-bridge/releases/tag/v1.0.1
+- npm: `cse-bridge@1.0.2` (https://www.npmjs.com/package/cse-bridge) — verified by installing from the registry and serving real traffic
+- GHCR: `ghcr.io/booyaka101/cse-bridge` `:1.0.2` `:1.0` `:1` `:latest`, multi-arch amd64+arm64, public — verified by anonymous pull + run
+- Release: https://github.com/Booyaka101/cse-bridge/releases/tag/v1.0.2
 
-v1.0.1 over v1.0.0: docker-compose.yml shipped `ghcr.io/Booyaka101/...` (mixed case); Docker rejects non-lowercase repo names, so `docker compose up` failed on a clean clone. Caught by CI's live job on the first push. npm 1.0.0 remains published but `latest` is 1.0.1.
+v1.0.1 over v1.0.0: docker-compose.yml shipped `ghcr.io/Booyaka101/...` (mixed case); Docker rejects non-lowercase repo names, so `docker compose up` failed on a clean clone. Caught by CI's live job on the first push.
+
+v1.0.2 over v1.0.1: docs only, no functional change. npm renders the README from the published tarball, so 1.0.1's page still showed the old maintainer-facing "Distribution" section pointing at the archived HN thread; it is now a reader-facing "Further reading and feedback" section. Also synced `package-lock.json`, which had been left at 1.0.0 during the 1.0.1 bump (npm ci tolerated the mismatch, but it was wrong). Verified after publish: `/healthz` on the freshly built container reports `1.0.2`, and an anonymous `docker pull ghcr.io/booyaka101/cse-bridge:1.0.2` runs and serves real search results. Note the VERSION constant in `src/server.ts` must be bumped alongside `package.json` — a plain `docker compose up -d` will NOT pick it up without `--build`.
 
 Publish-day operational notes: npm account `booyaka`, GitHub `Booyaka101`. The publish workflow's npm job skips gracefully when the version already exists or `NPM_TOKEN` is absent (no secret is configured — 1.0.x were published from this machine; add `NPM_TOKEN` to repo secrets to let tags publish npm too). GHCR publishes via the built-in `GITHUB_TOKEN` on any `v*` tag.
 
@@ -22,7 +24,7 @@ Last updated: 2026-08-03
 | r/selfhosted | LIVE in the weekly New Project Megathread — https://old.reddit.com/r/selfhosted/comments/1vb7psc/new_project_megathread_week_of_30_jul_2026/p1g1hof/ |
 | Hacker News | NOT DONE — see below |
 
-**The README's "post to the HN shutdown thread" advice is dead.** HN archives threads after ~14 days, and `item?id=48942250` is archived (no comment form). The live route is a Show HN, but the `Booyaka101` HN account has **3 karma** and `/submit` bounces with "You're posting too fast" (`fnop=story-toofast`) — needs aged karma or an owner-driven submission. Worth editing the README's distribution section accordingly.
+**HN thread is archived (README now fixed in 1.0.2).** HN archives threads after ~14 days, and `item?id=48942250` is archived (no comment form). The live route is a Show HN, but the `Booyaka101` HN account has **3 karma** and `/submit` bounces with "You're posting too fast" (`fnop=story-toofast`) — needs aged karma or an owner-driven submission.
 
 **r/selfhosted rule 6:** standalone new-project posts are removed (the first attempt was, by u/asimovs-auditor) — projects must go in the weekly "New Project Megathread". Note the Reddit account has 1 karma and old.reddit's `/submit` serves it a reCAPTCHA challenge; new-reddit's composer works.
 
