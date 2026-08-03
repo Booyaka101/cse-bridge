@@ -1,0 +1,63 @@
+{
+  "name": "cse-bridge",
+  "version": "1.0.0",
+  "description": "Self-hosted drop-in replacement for Google's Custom Search JSON API (shut down 2027-01-01) that speaks the customsearch/v1 wire format on top of your own SearXNG instance. Change one base URL, keep your code.",
+  "keywords": [
+    "google-custom-search",
+    "cse",
+    "searxng",
+    "self-hosted",
+    "search-api",
+    "migration",
+    "customsearch",
+    "google-api",
+    "drop-in-replacement"
+  ],
+  "license": "MIT",
+  "author": "cse-bridge contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Booyaka101/cse-bridge.git"
+  },
+  "homepage": "https://github.com/Booyaka101/cse-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Booyaka101/cse-bridge/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "cse-bridge": "bin/cse-bridge.js"
+  },
+  "main": "./dist/server.js",
+  "exports": {
+    ".": "./dist/server.js",
+    "./map": "./dist/map.js",
+    "./params": "./dist/params.js",
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/server.d.ts",
+  "files": [
+    "dist/",
+    "bin/",
+    "profiles.yml",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "start": "node bin/cse-bridge.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
+  }
+}

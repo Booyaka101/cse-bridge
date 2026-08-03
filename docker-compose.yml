@@ -1,0 +1,61 @@
+# cse-bridge quickstart.
+#
+#   docker compose up -d
+#   curl 'http://localhost:8080/customsearch/v1?key=k&cx=default&q=rust+async+runtime&num=3'
+#
+# SearXNG is REFERENCED, not vendored: this pulls the upstream image and mounts
+# a settings file whose only required change is enabling JSON output.
+# https://docs.searxng.org/dev/search_api.html — "Format needs to be activated
+# in search:".
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: cse-bridge-searxng
+    restart: unless-stopped
+    environment:
+      # SearXNG needs to know its own public URL for correct link generation.
+      SEARXNG_BASE_URL: http://localhost:8888/
+      # Generated per-deployment; override in a .env file for a real install.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-please-generate-a-random-secret}
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    ports:
+      # Exposed so you can sanity-check the backend directly. Safe to remove:
+      # the bridge reaches SearXNG over the internal compose network.
+      - "127.0.0.1:8888:8080"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  cse-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/Booyaka101/cse-bridge:latest
+    container_name: cse-bridge
+    restart: unless-stopped
+    depends_on:
+      - searxng
+    environment:
+      SEARXNG_URL: http://searxng:8080
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      PROFILES_FILE: /app/profiles.yml
+      # Leave unset to accept any `key`. Set it to require specific keys:
+      # CSE_BRIDGE_KEYS: "key-for-app-a,key-for-app-b"
+      CSE_BRIDGE_KEYS: ${CSE_BRIDGE_KEYS:-}
+    volumes:
+      - ./profiles.yml:/app/profiles.yml:ro
+    ports:
+      # Host port is overridable: set CSE_BRIDGE_HOST_PORT in .env if something
+      # already owns 8080 on your machine.
+      - "${CSE_BRIDGE_HOST_PORT:-8080}:8080"

@@ -1,0 +1,30 @@
+# cse-bridge profiles: map each `cx` your clients already send onto a backend
+# configuration. An unknown cx falls back to `default`, so a client you cannot
+# edit keeps working the moment you point it at this bridge.
+#
+# Keys per profile (all optional):
+#   engines:     SearXNG engine names. Empty = whatever the instance enables.
+#   categories:  SearXNG categories, e.g. general, news, it, science.
+#   site:        implicit site: restriction applied to every query on this cx.
+#   language:    fallback language when the client sends neither lr nor hl.
+#   description: free text, for your own reference.
+
+default:
+  description: General web search across the instance's enabled engines.
+  engines: []
+  categories: [general]
+
+# Example: an existing PSE that only ever searched your docs site. Point its cx
+# here and the same client code keeps returning the same shape of results.
+docs:
+  description: Documentation-only search.
+  categories: [general]
+  site: docs.rs
+
+news:
+  description: Recent news across the instance's news engines.
+  categories: [news]
+
+code:
+  description: Developer-oriented search (IT category).
+  categories: [it]

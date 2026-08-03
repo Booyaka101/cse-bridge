@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tgz
+*.log
+npm-debug.log*
+
+# Local runtime secrets / operator overrides
+.env
+profiles.local.yml
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Scratch dir for third-party client verification (not part of the package)
+verify/

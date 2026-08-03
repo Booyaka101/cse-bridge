@@ -1,0 +1,39 @@
+# SearXNG settings for the cse-bridge quickstart stack.
+#
+# The one line that actually matters is `json` under search.formats. Without it
+# SearXNG serves the HTML results page for ?format=json and the bridge cannot
+# read anything. See https://docs.searxng.org/dev/search_api.html —
+# "Format needs to be activated in search:".
+
+use_default_settings: true
+
+general:
+  instance_name: "cse-bridge backend"
+  # No public instance, no need to advertise metrics.
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+  formats:
+    - html
+    - json
+
+server:
+  # Overridden by SEARXNG_SECRET in docker-compose.yml.
+  secret_key: "change-me-please-generate-a-random-secret"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true

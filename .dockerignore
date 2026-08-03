@@ -1,0 +1,12 @@
+node_modules
+dist
+test
+searxng
+.git
+.gitignore
+*.md
+!README.md
+*.tgz
+*.log
+.env
+verify
