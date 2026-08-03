@@ -21,7 +21,23 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - run: npm ci
       - run: npm test
-      - run: npm publish --provenance --access public
+      - name: Decide whether to publish
+        id: gate
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "skip=no NPM_TOKEN secret configured" >> "$GITHUB_OUTPUT"
+          elif npm view "cse-bridge@$VERSION" version > /dev/null 2>&1; then
+            echo "skip=cse-bridge@$VERSION is already on the registry" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.skip != ''
+        run: echo "Skipping npm publish - ${{ steps.gate.outputs.skip }}"
+      - if: steps.gate.outputs.skip == ''
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
