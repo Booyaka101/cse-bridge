@@ -293,11 +293,15 @@ CSE_BRIDGE_LIVE=1 SEARXNG_URL=http://localhost:8888 npm test
 
 ---
 
-## Distribution
+## Further reading and feedback
 
-The single best first step: **post it to the [Hacker News thread about the shutdown](https://news.ycombinator.com/item?id=48942250)** and any successor thread. That thread is 53 points of people naming SerpApi, Serper, SearchApi and SearXNG as alternatives, including one who says *"I was using it for an ai agent i built for my use as home assistant."* They are looking for exactly this and have not found it — every alternative named there requires rewriting the call site. Lead with the diff at the top of this README.
+- **[Why `totalResults` and pagination are the hard parts](https://dev.to/booyaka101/google-kills-the-custom-search-json-api-on-2027-01-01-here-is-a-self-hosted-drop-in-3nk0)** — a longer write-up of the two problems above, with the measurements.
+- Discussion on [r/selfhosted](https://old.reddit.com/r/selfhosted/comments/1vb7psc/new_project_megathread_week_of_30_jul_2026/p1g1hof/).
+- Background: the [Hacker News thread on the shutdown](https://news.ycombinator.com/item?id=48942250) is worth reading for what people are migrating to. Note it is archived, so you cannot reply to it.
 
-Secondary: the ~65,000 monthly downloads of `@googleapis/customsearch` on npm are the stranded population, and every one of them has a deadline.
+**The most useful thing you can report:** a client library that will *not* accept an endpoint override. The whole premise of this project is that yours will — Node, Python and LangChain are verified, and the others in [the migration guide](docs/migrating-from-google-cse.md#go-java-ruby-php) follow the same documented mechanism but are not covered by the acceptance checks. If you hit one that can't be repointed, please [open an issue](https://github.com/Booyaka101/cse-bridge/issues); that is the case that breaks the premise and I want to know about it.
+
+Bug reports, missing CSE parameters, and SearXNG engine configurations that produce noticeably better results are all welcome.
 
 ---
 
