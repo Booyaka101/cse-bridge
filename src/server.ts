@@ -225,7 +225,7 @@ async function probeBackend(
   }
 }
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.0.1';
 
 /** Build a bridge from process.env. Used by bin/cse-bridge.js. */
 export function bridgeFromEnv(env: NodeJS.ProcessEnv = process.env): Bridge {

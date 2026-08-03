@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/Booyaka101/cse-bridge:latest
+    image: ghcr.io/booyaka101/cse-bridge:latest
     container_name: cse-bridge
     restart: unless-stopped
     depends_on:

@@ -28,6 +28,8 @@ docker compose up -d
 
 That is the whole install. Now make the call you were already making:
 
+(A prebuilt image is also on GHCR — `ghcr.io/booyaka101/cse-bridge` — which the compose file uses automatically once pulled; `docker compose up -d` builds locally either way.)
+
 ```bash
 curl 'http://localhost:8080/customsearch/v1?key=k&cx=default&q=rust%20async%20runtime&num=3'
 ```
