@@ -24,6 +24,16 @@ export interface SearxngResult {
   publishedDate?: string | null;
   score?: number;
   category?: string;
+  /** Image results only (categories=images) — see docs/dev/result_types/main/image. */
+  img_src?: string;
+  thumbnail_src?: string;
+  /** e.g. `"1920 x 1080"`. */
+  resolution?: string;
+  /** e.g. `"jpg"`, `"png"`. */
+  img_format?: string;
+  /** Human-readable, e.g. `"412 KB"`, `"1MB"`. */
+  filesize?: string;
+  source?: string;
   [key: string]: unknown;
 }
 
@@ -247,7 +257,7 @@ export class SearxngClient {
         const before = set.results.length;
         for (const r of res.results) {
           if (typeof r?.url !== 'string' || r.url.length === 0) continue;
-          const norm = normalizeUrl(r.url);
+          const norm = dedupeKey(r);
           if (set.seen.has(norm)) continue;
           set.seen.add(norm);
           set.results.push(r);
@@ -326,6 +336,19 @@ function cacheKey(opts: Omit<SearchOptions, 'pageno'>): string {
     (opts.engines ?? []).join(','),
     (opts.categories ?? []).join(','),
   ]);
+}
+
+/**
+ * What makes a result "the same result" for de-duplication.
+ *
+ * For image results `url` is the PAGE the image sits on, not the image — ten
+ * distinct images from one gallery all share it, and deduping on `url` would
+ * collapse them to one. The image itself is `img_src`, so that wins whenever
+ * it is present; web results fall back to `url` as before.
+ */
+export function dedupeKey(r: SearxngResult): string {
+  const imgSrc = typeof r.img_src === 'string' && r.img_src.trim().length > 0 ? r.img_src.trim() : undefined;
+  return normalizeUrl(imgSrc ?? r.url);
 }
 
 /** Dedupe key: ignore trailing slash and the fragment, keep everything else. */

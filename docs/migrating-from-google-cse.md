@@ -287,7 +287,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `start > 91` | 400 error | 400 error, identical envelope | No change. |
 | Max results | 100 per query | 100 per query | No change. |
 | `pagemap` | Present for many results | Absent | Check for `result.get("pagemap")` usage. |
-| `searchType=image` | Supported | Not supported | Out of scope for v1. |
+| `searchType=image` | Supported | Supported (v1.1.0+) | `link` is the image, `image.contextLink` the page, as on Google. `imgSize`/`imgType`/`imgColorType`/`imgDominantColor` validate against Google's enums but do not filter — SearXNG has no backend for them. `image.thumbnailWidth`/`thumbnailHeight` are omitted. |
 | `spelling` | Google's corrections | Only when SearXNG emits one | Thinner. |
 | `sort` | Several sort expressions | Only `date` / `date:a` / `date:d` act | Others are accepted, then ignored. |
 | Rate limits | 100 free queries/day, then paid | Whatever your SearXNG and its upstream engines tolerate | You now own this. |

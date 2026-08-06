@@ -134,7 +134,7 @@ SEARXNG_URL=http://localhost:8888 cse-bridge
 ```
 
 ```
-cse-bridge 1.0.0
+cse-bridge 1.1.0
   listening   http://localhost:8080
   endpoint    http://localhost:8080/customsearch/v1
   backend     http://localhost:8888
@@ -213,7 +213,7 @@ An unknown `cx` falls back to `default` — never an error, because a migrating 
 
 ## Supported parameters
 
-`key`, `cx`, `q`, `num`, `start`, `hl`, `lr`, `safe`, `siteSearch`, `siteSearchFilter`, `dateRestrict`, `fileType`, `exactTerms`, `excludeTerms`, `sort`.
+`key`, `cx`, `q`, `num`, `start`, `hl`, `lr`, `safe`, `siteSearch`, `siteSearchFilter`, `dateRestrict`, `fileType`, `exactTerms`, `excludeTerms`, `sort`, `searchType`, `imgSize`, `imgType`, `imgColorType`, `imgDominantColor`.
 
 A few behaviours are worth knowing:
 
@@ -222,6 +222,77 @@ A few behaviours are worth knowing:
 - **`dateRestrict`** (`d7`, `m6`, …) maps onto SearXNG's coarser `day`/`week`/`month`/`year` buckets, always rounding **up** — you get a superset of what you asked for, never a subset.
 - **`siteSearch`, `fileType`, `exactTerms`, `excludeTerms`** become search operators in the backend query, since SearXNG has no dedicated parameters for them.
 - **`sort=date`** reorders by the `publishedDate` SearXNG attaches to news and paper results; undated results keep their relevance order and sit last.
+- **`searchType=image`** switches to SearXNG's `images` category — see [Image search](#image-search) below. `image` is the only accepted value, exactly as on Google.
+- **`imgSize`, `imgType`, `imgColorType`, `imgDominantColor`** are validated against Google's exact enums (an out-of-enum value gets Google's 400, because Google rejects it too) and then accepted for compatibility — SearXNG has no size/type/color parameters to map them onto, so they do not filter anything. Same posture as `sort` expressions beyond `date`.
+
+---
+
+## Image search
+
+`searchType=image` works with the same one-line base-URL change as everything else. The `link` of each item is the **image file itself** (what Google promises — clients hotlink it into `<img>` tags), and the page it was found on is `image.contextLink`:
+
+```bash
+curl 'http://localhost:8080/customsearch/v1?key=k&cx=default&q=red%20panda&searchType=image&num=1'
+```
+
+```json
+{
+  "kind": "customsearch#search",
+  "url": {
+    "type": "application/json",
+    "template": "https://www.googleapis.com/customsearch/v1?q={searchTerms}&num={count?}&start={startIndex?}&cx={cx?}"
+  },
+  "queries": {
+    "request": [
+      {
+        "title": "Google Custom Search - red panda",
+        "totalResults": "2",
+        "searchTerms": "red panda",
+        "count": 1,
+        "startIndex": 1,
+        "inputEncoding": "utf8",
+        "outputEncoding": "utf8",
+        "safe": "off",
+        "cx": "default",
+        "searchType": "image"
+      }
+    ],
+    "nextPage": [ { "startIndex": 2, "count": 1, "...": "..." } ]
+  },
+  "searchInformation": {
+    "searchTime": 0.0000863,
+    "formattedSearchTime": "0.00",
+    "totalResults": "2",
+    "formattedTotalResults": "2"
+  },
+  "items": [
+    {
+      "kind": "customsearch#result",
+      "title": "50 Adorable Facts About The Red Pandas You Have To Know | Facts.net",
+      "htmlTitle": "50 Adorable Facts About The Red Pandas You Have To Know | Facts.net",
+      "link": "https://facts.net/wp-content/uploads/2020/08/AdobeStock_209028852.jpeg",
+      "displayLink": "facts.net",
+      "snippet": "50 Adorable Facts About The Red Pandas You Have To Know | Facts.net",
+      "htmlSnippet": "50 Adorable Facts About The Red Pandas You Have To Know | Facts.net",
+      "formattedUrl": "https://facts.net/wp-content/uploads/2020/08/AdobeStock_209028852.jpeg",
+      "htmlFormattedUrl": "https://facts.net/wp-content/uploads/2020/08/AdobeStock_209028852.jpeg",
+      "image": {
+        "contextLink": "https://facts.net/nature/animals/red-panda-facts",
+        "thumbnailLink": "https://ts1.mm.bing.net/th?id=OIP.I_aIcVvl98DbktQmP297ugHaE7&pid=15.1",
+        "width": 4000,
+        "height": 2666
+      }
+    }
+  ]
+}
+```
+
+That is a real response from the compose stack (only `nextPage` is elided; the 0.00 `searchTime` is the result-set cache answering — see [Pagination](#pagination-and-why-there-is-a-cache)). Worth knowing:
+
+- **`width`/`height`** are parsed from the `resolution` SearXNG reports; **`byteSize`** from its human-readable `filesize` (1 KB = 1024); **`mime`/`fileFormat`** from `img_format` (`jpg` → `image/jpeg`). When an engine does not report one of these, the field is **omitted** — never guessed. The example above has no `mime` because that engine sent no format.
+- **A result whose image URL is missing is dropped entirely** rather than emitted with a page URL as `link` — an item that claims to be an image but links to an HTML page breaks hotlinking clients silently.
+- **`searchType=image` supersedes the profile's `categories`** rather than merging with them: a `cx` pinned to `categories: [news]` cannot also be an image engine, and the client asking for images is the stronger signal. Everything else about the profile (its `site:` restriction, language, engines) still applies.
+- **Image and web result sets for the same query are cached separately**, so alternating between them never leaks results across.
 
 ---
 
@@ -254,7 +325,8 @@ Worth knowing before you migrate:
 - **`totalResults` is a lower bound, not an estimate of the web.** If your code displays "about 1,240,000 results", it will now show a much smaller honest number.
 - **100 results maximum per query** (`start` ≤ 91), same as Google.
 - **No `pagemap`**, no structured data, no rich snippets. SearXNG does not extract them.
-- **No image search**, no `searchType=image`.
+- **`image.thumbnailWidth` and `image.thumbnailHeight` are omitted** on image results — SearXNG does not report thumbnail dimensions, and inventing them would be worse than leaving them out (the same posture as `totalResults`). `width`, `height`, `byteSize`, `mime` and `fileFormat` appear whenever the engine reports the underlying data.
+- **The image filters (`imgSize`, `imgType`, `imgColorType`, `imgDominantColor`) validate but do not filter** — SearXNG has no backend for them.
 - **No `spelling` unless SearXNG produces a correction**; it is thinner than Google's.
 - **Result quality is your SearXNG's**, not Google's. Which engines are enabled, and whether they are being rate-limited, decides what you get. Check `unresponsive_engines` on your instance if results look thin.
 - **`sort` beyond `date`** is accepted and validated but has no backend to act on.
@@ -270,9 +342,9 @@ npm test
 ```
 
 ```
-# tests 109
-# suites 28
-# pass 109
+# tests 138
+# suites 33
+# pass 138
 # fail 0
 ```
 

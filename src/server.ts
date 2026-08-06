@@ -79,6 +79,13 @@ export async function handleSearch(
   const language = languageFor(params.lr, params.hl) ?? profile.language;
   const timeRange = params.dateRestrict ? dateRestrictToTimeRange(params.dateRestrict) : null;
 
+  // `searchType=image` SUPERSEDES the profile's categories rather than merging
+  // with them: a profile pinned to `categories: [news]` cannot also serve an
+  // image search, and the client asking for images is the stronger signal.
+  // The cache key in searxng.ts includes categories, so the image and web
+  // result sets for the same query never share a cache entry.
+  const categories = params.searchType === 'image' ? ['images'] : profile.categories;
+
   const startedAt = process.hrtime.bigint();
   const { results } = await deps.client.fetchWindow(
     {
@@ -87,7 +94,7 @@ export async function handleSearch(
       safesearch: safeToSearxng(params.safe),
       timeRange,
       engines: profile.engines,
-      categories: profile.categories,
+      categories,
     },
     params.start,
     params.num,
@@ -225,7 +232,7 @@ async function probeBackend(
   }
 }
 
-export const VERSION = '1.0.2';
+export const VERSION = '1.1.0';
 
 /** Build a bridge from process.env. Used by bin/cse-bridge.js. */
 export function bridgeFromEnv(env: NodeJS.ProcessEnv = process.env): Bridge {

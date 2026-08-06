@@ -18,6 +18,25 @@ export const MAX_START = 91;
 
 export type SafeLevel = 'off' | 'active' | 'high' | 'medium';
 
+/**
+ * Google's image-filter enums, verbatim from the cse.list reference. The four
+ * filters are VALIDATED (Google rejects out-of-enum values, so we must too)
+ * but then inert: SearXNG has no size/type/color parameters to map them onto,
+ * exactly like `sort` expressions beyond `date` today.
+ */
+export const IMG_SIZE_VALUES = ['huge', 'icon', 'large', 'medium', 'small', 'xlarge', 'xxlarge'] as const;
+export const IMG_TYPE_VALUES = ['clipart', 'face', 'lineart', 'stock', 'photo', 'animated'] as const;
+export const IMG_COLOR_TYPE_VALUES = ['color', 'gray', 'mono', 'trans'] as const;
+export const IMG_DOMINANT_COLOR_VALUES = [
+  'black', 'blue', 'brown', 'gray', 'green', 'orange',
+  'pink', 'purple', 'red', 'teal', 'white', 'yellow',
+] as const;
+
+export type ImgSize = (typeof IMG_SIZE_VALUES)[number];
+export type ImgType = (typeof IMG_TYPE_VALUES)[number];
+export type ImgColorType = (typeof IMG_COLOR_TYPE_VALUES)[number];
+export type ImgDominantColor = (typeof IMG_DOMINANT_COLOR_VALUES)[number];
+
 export interface CseParams {
   key: string | undefined;
   cx: string;
@@ -34,6 +53,11 @@ export interface CseParams {
   exactTerms: string | undefined;
   excludeTerms: string | undefined;
   sort: string | undefined;
+  searchType: 'image' | undefined;
+  imgSize: ImgSize | undefined;
+  imgType: ImgType | undefined;
+  imgColorType: ImgColorType | undefined;
+  imgDominantColor: ImgDominantColor | undefined;
 }
 
 const SAFE_VALUES: readonly SafeLevel[] = ['off', 'active', 'high', 'medium'];
@@ -155,6 +179,18 @@ export function parseParams(searchParams: URLSearchParams): CseParams {
     throw invalidArgument(`Invalid value for parameter 'sort': ${sort}.`, 'sort');
   }
 
+  // `image` is Google's only documented value; "If unspecified, results are
+  // limited to webpages", so absence means a plain web search.
+  const searchType = single(searchParams, 'searchType');
+  if (searchType !== undefined && searchType !== 'image') {
+    throw invalidArgument(`Invalid value for parameter 'searchType': ${searchType}. Expected 'image'.`, 'searchType');
+  }
+
+  const imgSize = enumParam(searchParams, 'imgSize', IMG_SIZE_VALUES);
+  const imgType = enumParam(searchParams, 'imgType', IMG_TYPE_VALUES);
+  const imgColorType = enumParam(searchParams, 'imgColorType', IMG_COLOR_TYPE_VALUES);
+  const imgDominantColor = enumParam(searchParams, 'imgDominantColor', IMG_DOMINANT_COLOR_VALUES);
+
   return {
     key: single(searchParams, 'key'),
     cx,
@@ -171,7 +207,25 @@ export function parseParams(searchParams: URLSearchParams): CseParams {
     exactTerms: single(searchParams, 'exactTerms'),
     excludeTerms: single(searchParams, 'excludeTerms'),
     sort,
+    searchType,
+    imgSize,
+    imgType,
+    imgColorType,
+    imgDominantColor,
   };
+}
+
+function enumParam<T extends string>(
+  searchParams: URLSearchParams,
+  name: string,
+  allowed: readonly T[],
+): T | undefined {
+  const raw = single(searchParams, name);
+  if (raw === undefined) return undefined;
+  if (!allowed.includes(raw as T)) {
+    throw invalidArgument(`Invalid value for parameter '${name}': ${raw}. Expected one of: ${allowed.join(', ')}.`, name);
+  }
+  return raw as T;
 }
 
 /**

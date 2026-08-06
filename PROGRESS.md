@@ -1,6 +1,21 @@
 # PROGRESS — cse-bridge
 
-**Status: v1.0.2 PUBLISHED (2026-08-03). All 8 ship-bar points met.**
+**Status: v1.1.0 BUILT AND VERIFIED (2026-08-06), ready to publish. v1.0.2 is the version currently on npm/GHCR.**
+
+## v1.1.0 — `searchType=image` (2026-08-06, this machine, not yet published)
+
+What shipped, all VERIFIED working:
+
+- **`searchType=image`** end to end: `categories=images` to SearXNG (superseding the profile's categories — documented), `mapImageItem` producing Google's exact item shape (`link` = `img_src`, `image.contextLink` = page URL, width/height from `resolution`, `byteSize` from human-readable `filesize` with 1 KB = 1024, `mime`/`fileFormat` from `img_format` with jpg→jpeg). Anything the engine does not report is omitted, never guessed — including `thumbnailWidth`/`thumbnailHeight`, which SearXNG never has. Results with no `img_src` are dropped, so no item ever pairs `image` with a page link. `searchType` round-trips in `queries.request[0]`.
+- **The four image filters** (`imgSize`/`imgType`/`imgColorType`/`imgDominantColor`) validate against Google's exact enums (fetched live from the cse.list reference on build day), reject out-of-enum with Google's 400 envelope, and are inert once accepted — same posture as `sort` beyond `date`.
+- **Gallery de-dupe fix** in `fetchWindow`: dedupe now keys on `img_src` when present (ten images on one gallery page used to collapse to one item). Covered by an offline test.
+- **Cache separation** image vs web for the same q verified — `cacheKey()` already included categories; a test pins it.
+- Tests: **138 offline** (was 109), **142 with `CSE_BRIDGE_LIVE=1`** against the real compose stack — all green. `npm run typecheck` clean.
+- Real E2E on build day: `q=red+panda&searchType=image` against the live SearXNG returned real image items in Google's shape (the README's new Image search section shows a real captured response).
+- Docs: the README Limitations bullet denying image search is gone, replaced with the honest thumbnail-dimensions note; migration guide row flipped to Supported; CHANGELOG.md created (1.0.0→1.1.0); package.json + package-lock + `VERSION` in src/server.ts all bumped to 1.1.0.
+- One test-only fix after a live run: the live image assertion `link !== contextLink` was over-strict — a real engine can serve a bare `.svg` URL as both the image and the page. The offline suite still pins the mapping.
+
+**To publish (owner, from the phone):** commit, tag `v1.1.0`, push — the existing workflow publishes GHCR on the tag; npm needs `npm publish` from this machine (no `NPM_TOKEN` secret configured) after `npm run build`. Remember PROGRESS lesson: a running `docker compose` stack needs `--build` to pick up the new code.
 
 - GitHub: https://github.com/Booyaka101/cse-bridge (public, CI green — the `live` job runs the full compose stack on the runner)
 - npm: `cse-bridge@1.0.2` (https://www.npmjs.com/package/cse-bridge) — verified by installing from the registry and serving real traffic
@@ -13,7 +28,7 @@ v1.0.2 over v1.0.1: docs only, no functional change. npm renders the README from
 
 Publish-day operational notes: npm account `booyaka`, GitHub `Booyaka101`. The publish workflow's npm job skips gracefully when the version already exists or `NPM_TOKEN` is absent (no secret is configured — 1.0.x were published from this machine; add `NPM_TOKEN` to repo secrets to let tags publish npm too). GHCR publishes via the built-in `GITHUB_TOKEN` on any `v*` tag.
 
-Last updated: 2026-08-03
+Last updated: 2026-08-06
 
 ## Distribution (2026-08-03)
 
@@ -133,6 +148,6 @@ Everything is verified working; there is no half-finished work. Sensible next mo
 1. `git init`, commit, push to `github.com/Booyaka101/cse-bridge`.
 2. Add the `NPM_TOKEN` secret, tag `v1.0.0`, let the workflow publish both artifacts.
 3. Post to the HN thread (`item?id=48942250`) — see the README's distribution section.
-4. Possible v1.1 work, all out of scope for v1: `searchType=image`, `pagemap` extraction from SearXNG's engine-specific extras, a `siterestrict` alias endpoint, and per-`cx` rate limits.
+4. Possible future work, out of scope so far: `pagemap` extraction from SearXNG's engine-specific extras, a `siterestrict` alias endpoint, and per-`cx` rate limits. (`searchType=image` shipped in v1.1.0.)
 
 To bring the stack back up: `docker compose up -d` (put `CSE_BRIDGE_HOST_PORT=8081` in `.env` if 8080 is busy on this machine — it currently is).

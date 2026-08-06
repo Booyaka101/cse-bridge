@@ -1,6 +1,6 @@
 {
   "name": "cse-bridge",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Self-hosted drop-in replacement for Google's Custom Search JSON API (shut down 2027-01-01) that speaks the customsearch/v1 wire format on top of your own SearXNG instance. Change one base URL, keep your code.",
   "keywords": [
     "google-custom-search",
@@ -46,6 +46,7 @@
     "docker-compose.yml",
     "docs/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
