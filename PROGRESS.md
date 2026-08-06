@@ -1,8 +1,14 @@
 # PROGRESS — cse-bridge
 
-**Status: v1.1.0 BUILT AND VERIFIED (2026-08-06), ready to publish. v1.0.2 is the version currently on npm/GHCR.**
+**Status: v1.1.0 PUBLISHED (2026-08-06). All 8 ship-bar points met.**
 
-## v1.1.0 — `searchType=image` (2026-08-06, this machine, not yet published)
+- GitHub: https://github.com/Booyaka101/cse-bridge — `main` at v1.1.0, tag `v1.1.0` pushed, CI + Guards + Publish all green
+- npm: `cse-bridge@1.1.0` — published from this machine as `booyaka`, then verified by installing FROM the registry into a clean dir and serving real image-search traffic
+- GHCR: `ghcr.io/booyaka101/cse-bridge:1.1.0` (digest `sha256:20ec6821…`), published by the tag workflow — verified by anonymous pull + run against the live SearXNG
+
+**Publish route, worth remembering:** only `mcp-vet` has an `NPM_TOKEN` repo secret, so this repo's Publish workflow *always* takes its graceful "no NPM_TOKEN secret configured" skip and the npm step shows as `skipped` — that is the designed path, not a failure. npm releases here are `npm publish --access public` from this machine (1.0.x went out the same way). GHCR is the reverse: Actions-only, on any `v*` tag. Registry propagation lagged ~1 min after publish (`npm view` still said 1.0.2) — poll before concluding anything went wrong.
+
+## v1.1.0 — `searchType=image` (2026-08-06)
 
 What shipped, all VERIFIED working:
 
@@ -15,7 +21,7 @@ What shipped, all VERIFIED working:
 - Docs: the README Limitations bullet denying image search is gone, replaced with the honest thumbnail-dimensions note; migration guide row flipped to Supported; CHANGELOG.md created (1.0.0→1.1.0); package.json + package-lock + `VERSION` in src/server.ts all bumped to 1.1.0.
 - One test-only fix after a live run: the live image assertion `link !== contextLink` was over-strict — a real engine can serve a bare `.svg` URL as both the image and the page. The offline suite still pins the mapping.
 
-**To publish (owner, from the phone):** commit, tag `v1.1.0`, push — the existing workflow publishes GHCR on the tag; npm needs `npm publish` from this machine (no `NPM_TOKEN` secret configured) after `npm run build`. Remember PROGRESS lesson: a running `docker compose` stack needs `--build` to pick up the new code.
+**Published 2026-08-06:** `main` + tag `v1.1.0` pushed (CI, Guards, Publish all green), GHCR built by the tag workflow, npm published locally. Both artifacts verified after the fact against the live SearXNG. Note: a running `docker compose` stack needs `--build` (or a re-pull) to pick up new code — the local stack on 8081 still ran 1.0.2 until then.
 
 - GitHub: https://github.com/Booyaka101/cse-bridge (public, CI green — the `live` job runs the full compose stack on the runner)
 - npm: `cse-bridge@1.0.2` (https://www.npmjs.com/package/cse-bridge) — verified by installing from the registry and serving real traffic
