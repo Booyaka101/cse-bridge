@@ -1,0 +1,50 @@
+name: Bug report
+description: Something didn't work the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please **never paste your Google API key or CX id** — check any command output you copy in here for them first.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, and what came back.
+      placeholder: |
+        $ cse-bridge --help
+        Error: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: cse-bridge version
+      description: Output of `cse-bridge --version`
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Node version and OS
+      description: Output of `node --version`, plus your OS.
+      placeholder: v22.18.0 on Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: The request that failed, with the key removed
+      description: Query, parameters and the shape of the response you got back. Redact the key and CX id.
+      render: json
