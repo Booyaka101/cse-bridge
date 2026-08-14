@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Custom Search JSON API shutdown notice
+    url: https://developers.google.com/custom-search/v1/overview
+    about: Google's own timeline and migration guidance for the 2027-01-01 shutoff.
+  - name: Programmable Search Engine control panel
+    url: https://programmablesearchengine.google.com/
+    about: Engine configuration, CX ids and quota questions belong with Google, not here.
+  - name: Security issue
+    url: https://github.com/Booyaka101/cse-bridge/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.
