@@ -33,12 +33,11 @@ jobs:
         run: npx --yes npm-script-lens@latest audit --path . --cooldown
 
       - name: TypeScript 7 readiness
-        uses: Booyaka101/ts7-compat-guard@v2
+        uses: Booyaka101/ts7-compat-guard@v3
 
       # Drift gate: fails if a dependency gains an install script nobody approved.
       - name: Allowlist drift
-        continue-on-error: true
-        run: npx --yes npm-script-lens@latest sync --path . --check
+        run: npx --yes npm-script-lens@1.4.0 sync --path . --check
 
       # Shell/Dockerfile/Terraform/PHP — the file types GitHub gated behind paid
       # Advanced Security. This repo ships a Dockerfile. Reports without gating.
