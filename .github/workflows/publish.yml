@@ -3,7 +3,12 @@ name: Publish
 # Tag a release to publish both artifacts:
 #   git tag v1.0.0 && git push origin v1.0.0
 #
-# npm needs an NPM_TOKEN repository secret. GHCR uses the built-in GITHUB_TOKEN.
+# npm authenticates by OIDC (trusted publishing) rather than a long-lived
+# token, so provenance is generated automatically and no NPM_TOKEN exists to be
+# stolen. GHCR still uses the built-in GITHUB_TOKEN.
+#
+# The npmjs.com side must name this file: Booyaka101 / cse-bridge /
+# publish.yml. Renaming this file breaks publishing until that entry matches.
 
 on:
   push:
@@ -15,34 +20,41 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # --provenance below signs through OIDC and fails without it
+      # The whole mechanism: without it there is no OIDC token to exchange.
+      # Deliberately no NODE_AUTH_TOKEN anywhere in this job, since a token
+      # alongside this grant makes npm prefer the token and skip the exchange.
+      id-token: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0. Node 22
+      # still bundles npm 10, so the runner's default is below the floor.
+      - name: Meet the trusted-publishing version floor
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          node --version
+          npm --version
+
       - run: npm ci
       - run: npm test
-      - name: Decide whether to publish
-        id: gate
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The gate used to ask whether an NPM_TOKEN existed. There is no token
+      # now, so the only question left is whether this version is already out.
+      - name: Publish to npm
         run: |
+          set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "skip=no NPM_TOKEN secret configured" >> "$GITHUB_OUTPUT"
-          elif npm view "cse-bridge@$VERSION" version > /dev/null 2>&1; then
-            echo "skip=cse-bridge@$VERSION is already on the registry" >> "$GITHUB_OUTPUT"
+          if npm view "cse-bridge@$VERSION" version >/dev/null 2>&1; then
+            echo "cse-bridge@$VERSION is already on the registry, nothing to do." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "skip=" >> "$GITHUB_OUTPUT"
+            npm publish --access public
+            echo "Published cse-bridge@$VERSION with provenance." >> "$GITHUB_STEP_SUMMARY"
           fi
-      - if: steps.gate.outputs.skip != ''
-        run: echo "Skipping npm publish - ${{ steps.gate.outputs.skip }}"
-      - if: steps.gate.outputs.skip == ''
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   ghcr:
     runs-on: ubuntu-latest
