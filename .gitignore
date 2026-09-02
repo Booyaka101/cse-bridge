@@ -16,3 +16,6 @@ Thumbs.db
 
 # Scratch dir for third-party client verification (not part of the package)
 verify/
+
+# Local build notes, not for the public repo
+PROGRESS.md
