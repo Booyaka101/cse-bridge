@@ -5,6 +5,8 @@
  * needs no configuration at all.
  */
 
+import { DEFAULT_PAGEMAP_MAX, DEFAULT_PAGEMAP_TIMEOUT_MS, DEFAULT_PAGEMAP_TTL_MS } from './pagemap.ts';
+
 export interface Config {
   /** Base URL of the SearXNG instance to proxy, no trailing slash. */
   searxngUrl: string;
@@ -29,6 +31,21 @@ export interface Config {
   cacheTtlMs: number;
   /** Maximum number of distinct queries held in the result-set cache. */
   cacheMax: number;
+  /**
+   * Reconstruct `item.pagemap` by fetching result pages. Off by default; a
+   * profile's `pagemap:` key overrides this per `cx`.
+   */
+  pagemap: boolean;
+  /** Result pages fetched per request when pagemap is on. */
+  pagemapMax: number;
+  /** Per-URL deadline for a pagemap fetch, milliseconds. */
+  pagemapTimeoutMs: number;
+  /** Deadline for the whole enrichment pass, milliseconds. */
+  pagemapBudgetMs: number;
+  /** Lifetime of a cached page, milliseconds. 0 disables the pagemap cache. */
+  pagemapTtlMs: number;
+  /** Let pagemap fetch loopback/private-network hosts. */
+  pagemapAllowPrivate: boolean;
 }
 
 const DEFAULTS = {
@@ -39,7 +56,19 @@ const DEFAULTS = {
   timeoutMs: 20_000,
   cacheTtlMs: 300_000,
   cacheMax: 256,
+  pagemap: false,
+  pagemapMax: DEFAULT_PAGEMAP_MAX,
+  pagemapTimeoutMs: DEFAULT_PAGEMAP_TIMEOUT_MS,
+  pagemapTtlMs: DEFAULT_PAGEMAP_TTL_MS,
+  pagemapAllowPrivate: false,
 } as const;
+
+/**
+ * Waves of `PAGEMAP_CONCURRENCY` fetches needed to cover the default
+ * `pagemapMax`. The budget therefore scales with the per-URL timeout instead of
+ * silently capping it at some fixed number of seconds.
+ */
+const PAGEMAP_BUDGET_WAVES = 3;
 
 export class ConfigError extends Error {}
 
@@ -84,6 +113,17 @@ function parseUrl(raw: string | undefined, name: string, fallback: string): stri
   return parsed.origin + parsed.pathname.replace(/\/+$/, '');
 }
 
+const TRUE_WORDS = ['on', 'true', 'yes', '1'];
+const FALSE_WORDS = ['off', 'false', 'no', '0'];
+
+function parseToggle(raw: string | undefined, name: string, fallback: boolean): boolean {
+  if (raw === undefined || raw === '') return fallback;
+  const value = raw.trim().toLowerCase();
+  if (TRUE_WORDS.includes(value)) return true;
+  if (FALSE_WORDS.includes(value)) return false;
+  throw new ConfigError(`${name} must be on or off (true/false and 1/0 also work), got ${JSON.stringify(raw)}`);
+}
+
 /** Parse a process environment into a validated Config. Throws ConfigError. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const keys = new Set(
@@ -91,6 +131,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(',')
       .map((k) => k.trim())
       .filter((k) => k.length > 0),
+  );
+
+  // The enrichment budget defaults to a multiple of the per-URL timeout, so it
+  // has to be resolved before the object literal.
+  const pagemapTimeoutMs = parsePositiveInt(
+    env['CSE_BRIDGE_PAGEMAP_TIMEOUT_MS'],
+    'CSE_BRIDGE_PAGEMAP_TIMEOUT_MS',
+    DEFAULTS.pagemapTimeoutMs,
   );
 
   return {
@@ -102,5 +150,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     timeoutMs: parsePositiveInt(env['CSE_BRIDGE_TIMEOUT_MS'], 'CSE_BRIDGE_TIMEOUT_MS', DEFAULTS.timeoutMs),
     cacheTtlMs: parseNonNegativeInt(env['CSE_BRIDGE_CACHE_TTL_MS'], 'CSE_BRIDGE_CACHE_TTL_MS', DEFAULTS.cacheTtlMs),
     cacheMax: parsePositiveInt(env['CSE_BRIDGE_CACHE_MAX'], 'CSE_BRIDGE_CACHE_MAX', DEFAULTS.cacheMax),
+    pagemap: parseToggle(env['CSE_BRIDGE_PAGEMAP'], 'CSE_BRIDGE_PAGEMAP', DEFAULTS.pagemap),
+    pagemapMax: parseNonNegativeInt(env['CSE_BRIDGE_PAGEMAP_MAX'], 'CSE_BRIDGE_PAGEMAP_MAX', DEFAULTS.pagemapMax),
+    pagemapTimeoutMs,
+    pagemapBudgetMs: parsePositiveInt(
+      env['CSE_BRIDGE_PAGEMAP_BUDGET_MS'],
+      'CSE_BRIDGE_PAGEMAP_BUDGET_MS',
+      pagemapTimeoutMs * PAGEMAP_BUDGET_WAVES,
+    ),
+    pagemapTtlMs: parseNonNegativeInt(env['CSE_BRIDGE_PAGEMAP_TTL_MS'], 'CSE_BRIDGE_PAGEMAP_TTL_MS', DEFAULTS.pagemapTtlMs),
+    pagemapAllowPrivate: parseToggle(
+      env['CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE'],
+      'CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE',
+      DEFAULTS.pagemapAllowPrivate,
+    ),
   };
 }

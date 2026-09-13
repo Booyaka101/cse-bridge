@@ -179,6 +179,12 @@ All configuration is environment variables. Every one has a working default.
 | `CSE_BRIDGE_TIMEOUT_MS` | `20000` | Per-request backend timeout. |
 | `CSE_BRIDGE_CACHE_TTL_MS` | `300000` | How long a query's result set stays stable. `0` disables caching — see [Pagination](#pagination-and-why-there-is-a-cache). |
 | `CSE_BRIDGE_CACHE_MAX` | `256` | Max distinct queries held in the cache. |
+| `CSE_BRIDGE_PAGEMAP` | `off` | `on` rebuilds `item.pagemap` by fetching the result pages. See [Structured data](#structured-data-rebuilding-pagemap). A profile's `pagemap:` key overrides this. |
+| `CSE_BRIDGE_PAGEMAP_MAX` | `10` | Result pages fetched per request; results sharing a page count once. `0` disables fetching. |
+| `CSE_BRIDGE_PAGEMAP_TIMEOUT_MS` | `3000` | Deadline for one page. |
+| `CSE_BRIDGE_PAGEMAP_BUDGET_MS` | `9000` | Deadline for the whole enrichment pass. Defaults to 3x the per-URL timeout. Items not reached in time come back bare. |
+| `CSE_BRIDGE_PAGEMAP_TTL_MS` | `3600000` | How long a fetched page stays cached. |
+| `CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE` | `off` | `on` lets pagemap fetch loopback and private addresses. Only needed for an intranet index. |
 
 ### Profiles: what your `cx` means now
 
@@ -195,6 +201,7 @@ docs:
 
 news:
   categories: [news]
+  pagemap: true          # rebuild item.pagemap for this cx only
 ```
 
 An unknown `cx` falls back to `default` — never an error, because a migrating client cannot change the `cx` it sends.
@@ -296,6 +303,88 @@ That is a real response from the compose stack (only `nextPage` is elided; the 0
 
 ---
 
+## Structured data: rebuilding `pagemap`
+
+Google's `item.pagemap` carried the structured data it had scraped from each result page: `metatags`, schema.org objects, `cse_image`, `cse_thumbnail`. SearXNG returns none of that, so code that read `item["pagemap"]["metatags"][0]["og:image"]` breaks on migration.
+
+The bridge can rebuild it. Off by default, because it makes the bridge fetch the result pages:
+
+```bash
+CSE_BRIDGE_PAGEMAP=on cse-bridge
+```
+
+Or per `cx`, which wins over the environment either way:
+
+```yaml
+docs:
+  categories: [general]
+  pagemap: true
+```
+
+A real result from the compose stack with it on:
+
+```json
+{
+  "link": "https://users.rust-lang.org/t/async-await-and-multi-thread-tokio-runtime/110107",
+  "title": "Async/await and multi-thread Tokio runtime - help - The Rust Programming Language Forum",
+  "pagemap": {
+    "metatags": [
+      {
+        "description": "Hey guys! I'm trying to grasp async/await usage with Tokio runtime. ...",
+        "generator": "Discourse 2026.9.0-latest",
+        "og:site_name": "The Rust Programming Language Forum",
+        "og:type": "website",
+        "twitter:card": "summary",
+        "og:image": "https://us1.discourse-cdn.com/flex019/uploads/rust_lang/original/2X/8/83e41956eccfd67ad6ff76f15a2c22e58db31d4f.svg",
+        "og:title": "Async/await and multi-thread Tokio runtime",
+        "article:published_time": "2024-04-17T19:15:04+00:00"
+      }
+    ],
+    "qapage": [
+      { "name": "Async/await and multi-thread Tokio runtime", "datepublished": "2024-04-17T19:15:04.626Z" }
+    ],
+    "question": [
+      { "answercount": "10", "upvotecount": "0", "name": "Async/await and multi-thread Tokio runtime", "...": "..." }
+    ],
+    "person": [
+      { "name": "frozenspider", "url": "https://users.rust-lang.org/u/frozenspider" },
+      { "name": "parasyte", "url": "https://users.rust-lang.org/u/parasyte" }
+    ],
+    "cse_image": [ { "src": "https://us1.discourse-cdn.com/flex019/uploads/rust_lang/original/2X/8/83e41956eccfd67ad6ff76f15a2c22e58db31d4f.svg" } ],
+    "cse_thumbnail": [ { "src": "https://us1.discourse-cdn.com/flex019/uploads/rust_lang/original/2X/8/83e41956eccfd67ad6ff76f15a2c22e58db31d4f.svg" } ]
+  }
+}
+```
+
+(Elided for length: the `metatags` object had 20 keys, `person` had 11 entries, and there was an `answer` array.)
+
+### What goes in it
+
+| Key | Comes from |
+| --- | --- |
+| `metatags` | `<meta name=...>` and `<meta property=...>`. The key is **exactly as the page wrote it**: `og:title` keeps its case, a bare `name` is lowercased. That is what Google did. |
+| Lowercased schema.org type (`qapage`, `product`, `newsarticle`, ...) | `<script type="application/ld+json">`, including every node in an `@graph`, and microdata `itemtype`/`itemprop`. |
+| `cse_image`, `cse_thumbnail` | `[{ "src": ... }]` from the first of `og:image`, `og:image:secure_url`, `twitter:image`, `twitter:image:src` that resolves to an http(s) URL. |
+| Anything in a literal `<PageMap>` block | Pages that publish Google's own `<PageMap>` markup. It wins over a DataObject of the same name, since the site meant it literally. |
+
+**When nothing parses, the `pagemap` key is absent**, not an empty object. Nothing is ever synthesized to fill a gap.
+
+### What it costs
+
+Per request the bridge fetches up to `CSE_BRIDGE_PAGEMAP_MAX` (10) result **pages**, 4 at a time, each with a 3s deadline, under a 9s deadline for the whole pass. Results that share a page share one fetch, and the fragment is ignored, so ten images from one gallery or three `#section` links cost a single request and all of them get the pagemap. A page that is slow, unreachable, not HTML, or redirects more than twice leaves that item bare and the search still returns 200. Bodies are capped at 512 KB and reading stops at `</head>`. Pages are cached by URL for an hour, so a repeated query costs nothing.
+
+Because these are URLs a search backend chose, pagemap refuses loopback, RFC1918, link-local and CGNAT addresses and `.internal`/`.local` names. Set `CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE=on` if you are indexing an intranet. That check resolves the hostname you were sent, not the socket, so it is not proof against DNS rebinding. Do not point a public bridge at a private network.
+
+### Where it will not match Google
+
+- Data Google built rather than read. Its index held objects the page never published, and those cannot be recovered from the page.
+- `cse_thumbnail` `width` and `height`. Those described Google's own thumbnail crop. The bridge emits `src` only, rather than inventing dimensions.
+- Anything below `</head>`. Microdata in the body is not scanned, so a page that puts its only schema.org markup in the footer parses to nothing.
+- Anything past the 512 KB read cap. A few big sites (YouTube, for one) put a megabyte of inline script above their `og:` tags, so the read stops before reaching them and the item comes back with almost nothing. Google crawled the whole page; the bridge deliberately does not.
+- Google's 50-attribute and 1024-character caps are applied; a value longer than that is dropped, not truncated. Google also documented dropping `description` and a few other tags, but its live API returned them, so the bridge keeps them.
+
+---
+
 ## Pagination, and why there is a cache
 
 This is the part that quietly breaks naive implementations.
@@ -324,7 +413,7 @@ Worth knowing before you migrate:
 
 - **`totalResults` is a lower bound, not an estimate of the web.** If your code displays "about 1,240,000 results", it will now show a much smaller honest number.
 - **100 results maximum per query** (`start` ≤ 91), same as Google.
-- **No `pagemap`**, no structured data, no rich snippets. SearXNG does not extract them.
+- **`pagemap` is reconstructed from the page, not from Google's index.** SearXNG extracts none of it, so with `CSE_BRIDGE_PAGEMAP=on` the bridge fetches the result pages itself and rebuilds `metatags`, schema.org DataObjects from JSON-LD and microdata, `cse_image`/`cse_thumbnail`, and any literal `<PageMap>` block. It is off by default. What it cannot give you: DataObjects that only ever existed because **Google** built them, and `cse_thumbnail` `width`/`height`, which were the dimensions of Google's own crop. Those are omitted rather than guessed. See [Structured data](#structured-data-rebuilding-pagemap).
 - **`image.thumbnailWidth` and `image.thumbnailHeight` are omitted** on image results — SearXNG does not report thumbnail dimensions, and inventing them would be worse than leaving them out (the same posture as `totalResults`). `width`, `height`, `byteSize`, `mime` and `fileFormat` appear whenever the engine reports the underlying data.
 - **The image filters (`imgSize`, `imgType`, `imgColorType`, `imgDominantColor`) validate but do not filter** — SearXNG has no backend for them.
 - **No `spelling` unless SearXNG produces a correction**; it is thinner than Google's.
@@ -342,9 +431,9 @@ npm test
 ```
 
 ```
-# tests 138
-# suites 33
-# pass 138
+# tests 196
+# suites 41
+# pass 196
 # fail 0
 ```
 

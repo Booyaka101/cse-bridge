@@ -53,6 +53,15 @@ services:
       # Leave unset to accept any `key`. Set it to require specific keys:
       # CSE_BRIDGE_KEYS: "key-for-app-a,key-for-app-b"
       CSE_BRIDGE_KEYS: ${CSE_BRIDGE_KEYS:-}
+      # Reconstruct item.pagemap by fetching result pages. Off by default;
+      # set CSE_BRIDGE_PAGEMAP=on in .env to turn it on for every profile.
+      CSE_BRIDGE_PAGEMAP: ${CSE_BRIDGE_PAGEMAP:-}
+      CSE_BRIDGE_PAGEMAP_MAX: ${CSE_BRIDGE_PAGEMAP_MAX:-}
+      CSE_BRIDGE_PAGEMAP_TIMEOUT_MS: ${CSE_BRIDGE_PAGEMAP_TIMEOUT_MS:-}
+      CSE_BRIDGE_PAGEMAP_BUDGET_MS: ${CSE_BRIDGE_PAGEMAP_BUDGET_MS:-}
+      CSE_BRIDGE_PAGEMAP_TTL_MS: ${CSE_BRIDGE_PAGEMAP_TTL_MS:-}
+      # Only for an intranet index: lets pagemap fetch private addresses.
+      CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE: ${CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE:-}
     volumes:
       - ./profiles.yml:/app/profiles.yml:ro
     ports:

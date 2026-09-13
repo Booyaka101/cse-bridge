@@ -30,6 +30,12 @@ export interface Profile {
   language: string | undefined;
   /** Human label, surfaced nowhere on the wire but useful in logs. */
   description: string | undefined;
+  /**
+   * Per-cx override of `CSE_BRIDGE_PAGEMAP`. `undefined` means "whatever the
+   * environment says", which is how a profile that never mentions pagemap keeps
+   * behaving exactly as it did before the key existed.
+   */
+  pagemap: boolean | undefined;
 }
 
 export const DEFAULT_PROFILE: Profile = {
@@ -37,6 +43,7 @@ export const DEFAULT_PROFILE: Profile = {
   categories: [],
   site: undefined,
   language: undefined,
+  pagemap: undefined,
   description: 'Built-in default: whatever the SearXNG instance is configured to search.',
 };
 
@@ -170,12 +177,30 @@ function asString(value: YamlValue | undefined): string | undefined {
   return value.length === 0 ? undefined : value;
 }
 
-function toProfile(block: Record<string, YamlValue>): Profile {
+const TRUE_WORDS = ['true', 'on', 'yes', '1'];
+const FALSE_WORDS = ['false', 'off', 'no', '0'];
+
+/**
+ * A boolean profile key. An unreadable value is an error rather than a silent
+ * fallback, for the same reason a malformed file is: guessing would send a cx
+ * to a configuration nobody asked for.
+ */
+function asBoolean(value: YamlValue | undefined, key: string, profile: string): boolean | undefined {
+  const raw = asString(value);
+  if (raw === undefined) return undefined;
+  const word = raw.trim().toLowerCase();
+  if (TRUE_WORDS.includes(word)) return true;
+  if (FALSE_WORDS.includes(word)) return false;
+  throw new ProfilesError(`profiles: ${profile}.${key} must be true or false, got ${JSON.stringify(raw)}`);
+}
+
+function toProfile(name: string, block: Record<string, YamlValue>): Profile {
   return {
     engines: asList(block['engines']),
     categories: asList(block['categories']),
     site: asString(block['site']),
     language: asString(block['language']),
+    pagemap: asBoolean(block['pagemap'], 'pagemap', name),
     description: asString(block['description']),
   };
 }
@@ -185,7 +210,7 @@ export function profilesFromYaml(text: string, source: string | null): ProfileSe
   const doc = parseYaml(text);
   const map = new Map<string, Profile>();
   for (const [name, block] of Object.entries(doc)) {
-    map.set(name, toProfile(block));
+    map.set(name, toProfile(name, block));
   }
   const fallback = map.get('default') ?? DEFAULT_PROFILE;
   return {

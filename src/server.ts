@@ -10,6 +10,7 @@ import { ApiError, invalidApiKey, missingApiKey, notFound } from './errors.ts';
 import { buildQueryString, dateRestrictToTimeRange, languageFor, parseParams, safeToSearxng } from './params.ts';
 import { applySort, mapResponse, type CseSearchResponse } from './map.ts';
 import { SearxngClient } from './searxng.ts';
+import { PagemapClient } from './pagemap.ts';
 import { builtinProfiles, loadProfiles, type ProfileSet } from './profiles.ts';
 import { loadConfig, type Config } from './config.ts';
 
@@ -20,6 +21,7 @@ export interface BridgeOptions {
   config: Config;
   profiles?: ProfileSet;
   client?: SearxngClient;
+  pagemap?: PagemapClient;
   /** Set false to silence request logging (tests). */
   log?: boolean;
 }
@@ -69,7 +71,7 @@ function checkKey(config: Config, key: string | undefined): void {
 /** Run one search request end to end. Exported so tests can skip HTTP. */
 export async function handleSearch(
   searchParams: URLSearchParams,
-  deps: { config: Config; profiles: ProfileSet; client: SearxngClient },
+  deps: { config: Config; profiles: ProfileSet; client: SearxngClient; pagemap?: PagemapClient },
 ): Promise<CseSearchResponse> {
   const params = parseParams(searchParams);
   checkKey(deps.config, params.key);
@@ -107,7 +109,17 @@ export async function handleSearch(
   const window = ordered.slice(params.start - 1, params.start - 1 + params.num);
   const hasMore = ordered.length > params.start - 1 + window.length;
 
-  return mapResponse({ params, results: window, hasMore, searchTime });
+  const response = mapResponse({ params, results: window, hasMore, searchTime });
+
+  // Pagemap reconstruction runs on the mapped items, after the response is
+  // otherwise complete: the profile wins over the environment, and a failure
+  // in here can only ever mean "no pagemap", never a failed search.
+  const pagemapOn = profile.pagemap ?? deps.config.pagemap;
+  if (pagemapOn && deps.pagemap !== undefined && response.items !== undefined) {
+    await deps.pagemap.enrich(response.items);
+  }
+
+  return response;
 }
 
 export function createBridge(opts: BridgeOptions): Bridge {
@@ -120,6 +132,16 @@ export function createBridge(opts: BridgeOptions): Bridge {
       timeoutMs: config.timeoutMs,
       cacheTtlMs: config.cacheTtlMs,
       cacheMax: config.cacheMax,
+    });
+  const pagemap =
+    opts.pagemap ??
+    new PagemapClient({
+      maxUrls: config.pagemapMax,
+      timeoutMs: config.pagemapTimeoutMs,
+      budgetMs: config.pagemapBudgetMs,
+      ttlMs: config.pagemapTtlMs,
+      cacheMax: config.cacheMax,
+      allowPrivateHosts: config.pagemapAllowPrivate,
     });
   const shouldLog = opts.log !== false;
 
@@ -164,6 +186,7 @@ export function createBridge(opts: BridgeOptions): Bridge {
         profilesSource: profiles.source,
         authRequired: config.keys.size > 0,
         cachedQueries: client.cacheSize,
+        pagemap: { enabled: config.pagemap, maxUrls: config.pagemapMax, cachedPages: pagemap.cacheSize },
       });
       finish(status);
       return;
@@ -182,7 +205,7 @@ export function createBridge(opts: BridgeOptions): Bridge {
     }
 
     try {
-      const body = await handleSearch(url.searchParams, { config, profiles, client });
+      const body = await handleSearch(url.searchParams, { config, profiles, client, pagemap });
       sendJson(res, 200, body);
       finish(200);
     } catch (err) {
@@ -232,7 +255,7 @@ async function probeBackend(
   }
 }
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 /** Build a bridge from process.env. Used by bin/cse-bridge.js. */
 export function bridgeFromEnv(env: NodeJS.ProcessEnv = process.env): Bridge {
@@ -240,5 +263,5 @@ export function bridgeFromEnv(env: NodeJS.ProcessEnv = process.env): Bridge {
   return createBridge({ config });
 }
 
-export { loadConfig, builtinProfiles, SearxngClient };
+export { loadConfig, builtinProfiles, SearxngClient, PagemapClient };
 export type { Config, ProfileSet };

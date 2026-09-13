@@ -37,6 +37,22 @@ ENVIRONMENT
   PROFILES_FILE           Path to profiles.yml mapping cx -> backend profile
                           (default ./profiles.yml; missing file is fine)
   CSE_BRIDGE_TIMEOUT_MS   Per-request backend timeout (default 20000)
+  CSE_BRIDGE_CACHE_TTL_MS How long a query's result set stays stable so deep
+                          pages stay disjoint (default 300000; 0 disables)
+  CSE_BRIDGE_CACHE_MAX    Distinct queries held in that cache (default 256)
+  CSE_BRIDGE_PAGEMAP      'on' rebuilds item.pagemap by fetching result pages
+                          (default off). A profile's pagemap: key wins over it.
+  CSE_BRIDGE_PAGEMAP_MAX  Result URLs fetched per request (default 10)
+  CSE_BRIDGE_PAGEMAP_TIMEOUT_MS
+                          Per-URL deadline (default 3000)
+  CSE_BRIDGE_PAGEMAP_BUDGET_MS
+                          Deadline for the whole enrichment pass
+                          (default 3x the per-URL timeout)
+  CSE_BRIDGE_PAGEMAP_TTL_MS
+                          Lifetime of a cached page (default 3600000)
+  CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE
+                          'on' lets pagemap fetch loopback/private addresses,
+                          needed only for an intranet index (default off)
 
 EXAMPLE
   SEARXNG_URL=http://localhost:8888 cse-bridge
@@ -110,7 +126,8 @@ async function main() {
       `  backend     ${bridge.config.searxngUrl}\n` +
       `  profiles    ${bridge.profiles.names().join(', ')}` +
       `${bridge.profiles.source ? ` (from ${bridge.profiles.source})` : ' (built-in default)'}\n` +
-      `  auth        ${bridge.config.keys.size > 0 ? `${bridge.config.keys.size} key(s) required` : 'disabled (any key accepted)'}\n`,
+      `  auth        ${bridge.config.keys.size > 0 ? `${bridge.config.keys.size} key(s) required` : 'disabled (any key accepted)'}\n` +
+      `  pagemap     ${bridge.config.pagemap ? `on (up to ${bridge.config.pagemapMax} result pages fetched per request)` : 'off'}\n`,
   );
 
   let closing = false;

@@ -17,6 +17,7 @@ Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS
 - [Go, Java, Ruby, PHP](#go-java-ruby-php)
 - [Raw HTTP / curl](#raw-http--curl)
 - [What your `cx` becomes](#what-your-cx-becomes)
+- [What happens to `pagemap`](#what-happens-to-pagemap)
 - [Behaviour differences to check before you cut over](#behaviour-differences-to-check-before-you-cut-over)
 - [Troubleshooting](#troubleshooting)
 
@@ -276,6 +277,53 @@ Available profile keys: `engines`, `categories`, `site`, `language`, `descriptio
 
 ---
 
+## What happens to `pagemap`
+
+Google attached an `item.pagemap` to most results: the structured data it had scraped from the page, plus a few things its own index added. Code like this is the single most common thing that breaks on migration.
+
+```python
+img = item.get("pagemap", {}).get("cse_thumbnail", [{}])[0].get("src")
+```
+
+SearXNG does not extract structured data, so out of the box `pagemap` is absent. From v1.2.0 the bridge can rebuild it by fetching the result pages itself:
+
+```bash
+CSE_BRIDGE_PAGEMAP=on cse-bridge
+```
+
+Per `cx`, which overrides the environment in both directions:
+
+```yaml
+shop:
+  categories: [general]
+  pagemap: true
+```
+
+### What you can rely on
+
+- **`metatags`.** One object, keys exactly as the page wrote them, the same convention Google used: `og:title` and `twitter:card` keep their case, a bare `name="description"` is lowercased. If you read `metatags[0]["og:image"]`, that keeps working for any page that publishes the tag.
+- **`cse_image` and `cse_thumbnail`** as `[{"src": ...}]`, derived from `og:image`, or its `og:image:secure_url`, `twitter:image` and `twitter:image:src` fallbacks. A thumbnail-only client migrates cleanly.
+- **schema.org DataObjects** keyed by lowercased type (`product`, `recipe`, `newsarticle`, `qapage`, ...) from JSON-LD and from microdata, with attribute names lowercased, as on Google. `@graph` nodes are walked, so a single JSON-LD block can produce several objects.
+- **A literal `<PageMap>` block**, if the site publishes one. That was Google's own markup for site owners and it still means what it meant.
+- **Absence is honest.** When nothing parses, the `pagemap` key is not there at all. Guard with `item.get("pagemap")` and you will never see an empty object pretending to be data.
+
+### What you cannot
+
+- **Objects Google synthesized.** Some DataObjects existed because Google's index built them, not because the page published anything. Nothing can recover those from the page, and the bridge does not guess.
+- **`cse_thumbnail` `width` and `height`.** Those described the crop in Google's thumbnail cache, which does not exist here. Only `src` is emitted. Code that positions an `<img>` from those numbers needs its own sizing.
+- **Every result having one.** Up to 10 pages are fetched per request, 4 at a time, each with a 3 second deadline and a 9 second deadline for the whole pass. A page that is slow, blocks the fetch, or is not HTML leaves that item bare. The search itself still returns 200, so treat a missing `pagemap` as normal, not as an error.
+- **Byte-equality with what Google sent you.** Pages change, and the bridge reads the page now rather than whatever Google's crawler saw months ago.
+- **Anything below `</head>`.** Reading stops there, so markup that only appears in the page body is not seen.
+- **Pages that bury their tags behind a megabyte of script.** The read is capped at 512 KB, and a handful of large sites put that much inline JavaScript above their `og:` tags. Those items come back nearly empty.
+
+### Before you turn it on
+
+It makes every search fan out into up to ten more HTTP requests to third-party sites, from your server, with `User-Agent: cse-bridge`. That is a different traffic profile than a bridge that only talks to your SearXNG. Pages are cached for an hour, so repeated queries are cheap, and the first request for a query gets slower by roughly the slowest page in the batch.
+
+The fetcher refuses loopback, RFC1918, link-local and CGNAT addresses, and `.internal`/`.local` names, since the URLs come from a search backend rather than from you. `CSE_BRIDGE_PAGEMAP_ALLOW_PRIVATE=on` lifts that if you are indexing an intranet.
+
+---
+
 ## Behaviour differences to check before you cut over
 
 Go through this list against your own code — these are the places a drop-in swap can still surprise you.
@@ -286,7 +334,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `num > 10` | 400 error | Clamped to 10 | Strictly friendlier. |
 | `start > 91` | 400 error | 400 error, identical envelope | No change. |
 | Max results | 100 per query | 100 per query | No change. |
-| `pagemap` | Present for many results | Absent | Check for `result.get("pagemap")` usage. |
+| `pagemap` | Present for many results | Off by default; reconstructed from the page when enabled (v1.2.0+) | See [What happens to `pagemap`](#what-happens-to-pagemap) before you rely on it. |
 | `searchType=image` | Supported | Supported (v1.1.0+) | `link` is the image, `image.contextLink` the page, as on Google. `imgSize`/`imgType`/`imgColorType`/`imgDominantColor` validate against Google's enums but do not filter — SearXNG has no backend for them. `image.thumbnailWidth`/`thumbnailHeight` are omitted. |
 | `spelling` | Google's corrections | Only when SearXNG emits one | Thinner. |
 | `sort` | Several sort expressions | Only `date` / `date:a` / `date:d` act | Others are accepted, then ignored. |

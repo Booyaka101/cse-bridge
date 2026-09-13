@@ -13,7 +13,15 @@
  * payload yields `undefined` and, with a naive fallback, a fabricated number.
  */
 
+import { trim } from './cache.ts';
 import { backendUnavailable, rateLimited } from './errors.ts';
+
+/**
+ * Identifies the bridge to every host it talks to — SearXNG, and (when pagemap
+ * reconstruction is on) the result pages themselves. One constant so a site
+ * that wants to allow or block us only has to match one string.
+ */
+export const USER_AGENT = 'cse-bridge';
 
 export interface SearxngResult {
   url: string;
@@ -140,7 +148,7 @@ export class SearxngClient {
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}/`, {
-        headers: { 'User-Agent': 'cse-bridge' },
+        headers: { 'User-Agent': USER_AGENT },
         signal: AbortSignal.timeout(Math.min(this.timeoutMs, 5000)),
       });
     } catch (err) {
@@ -163,7 +171,7 @@ export class SearxngClient {
       res = await this.fetchImpl(url, {
         headers: {
           Accept: 'application/json',
-          'User-Agent': 'cse-bridge',
+          'User-Agent': USER_AGENT,
         },
         signal: AbortSignal.timeout(this.timeoutMs),
       });
@@ -271,7 +279,7 @@ export class SearxngClient {
 
       if (this.cacheTtlMs > 0) {
         this.cache.set(key, set);
-        this.evict(now);
+        trim(this.cache, now, this.cacheMax);
       }
       return set;
     };
@@ -302,19 +310,6 @@ export class SearxngClient {
       pagesFetched: pagesFetchedNow,
       cached: pagesFetchedNow === 0,
     };
-  }
-
-  /** Drop expired entries, then the oldest entries, down to cacheMax. */
-  private evict(now: number): void {
-    for (const [k, v] of this.cache) {
-      if (v.expiresAt <= now) this.cache.delete(k);
-    }
-    // Map iterates in insertion order, so the first key is the oldest.
-    while (this.cache.size > this.cacheMax) {
-      const oldest = this.cache.keys().next();
-      if (oldest.done) break;
-      this.cache.delete(oldest.value);
-    }
   }
 
   /** Number of cached result sets. Surfaced on /healthz. */
