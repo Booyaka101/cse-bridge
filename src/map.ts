@@ -19,6 +19,7 @@
  */
 
 import type { CseParams } from './params.ts';
+import type { PageMap } from './pagemap.ts';
 import type { SearxngResult } from './searxng.ts';
 import { MAX_START } from './params.ts';
 
@@ -36,6 +37,12 @@ export interface CseItem {
   mime?: string;
   fileFormat?: string;
   image?: CseImage;
+  /**
+   * Reconstructed from the result page when pagemap is enabled, absent
+   * otherwise. Derived from the page itself, never from Google's index —
+   * see src/pagemap.ts.
+   */
+  pagemap?: PageMap;
 }
 
 /**
