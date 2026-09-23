@@ -297,7 +297,9 @@ export function operatorPattern(raw: string): string {
   const text = raw.trim().replace(SCHEME, '').replace(/^\/\//, '');
   const slash = text.indexOf('/');
   if (slash === -1 || /[*?]/.test(text.slice(slash))) return text;
-  const path = text.slice(slash).replace(/\/+$/, '');
+  let end = text.length;
+  while (end > slash && text[end - 1] === '/') end--;
+  const path = text.slice(slash, end);
   return path === '' ? text.slice(0, slash) : `${text.slice(0, slash)}${path}/*`;
 }
 
