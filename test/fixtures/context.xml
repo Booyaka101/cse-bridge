@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomSearchEngine id="abcdefghijk" creator="0123456789" language="en" version="1.0">
+  <Title>WebMD health</Title>
+  <Context>
+    <Facet>
+      <FacetItem>
+        <Label name="nutrition" mode="FILTER"/>
+        <Title>Nutrition</Title>
+      </FacetItem>
+    </Facet>
+    <BackgroundLabels>
+      <Label name="_cse_abcdefghijk" mode="FILTER"/>
+      <Label name="_cse_exclude_abcdefghijk" mode="ELIMINATE"/>
+    </BackgroundLabels>
+  </Context>
+  <LookAndFeel nonprofit="false"/>
+</CustomSearchEngine>

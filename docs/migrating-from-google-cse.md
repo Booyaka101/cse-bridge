@@ -266,14 +266,26 @@ default:
 "012345678901234567890:abcdefghij":
   description: Was "Docs PSE" in the Google control panel.
   categories: [general]
-  site: docs.example.com
+  sites: [docs.example.com]
 ```
 
 Now the untouched client keeps sending its original `cx` and gets site-restricted results.
 
 An unrecognised `cx` falls back to `default` rather than erroring, on the principle that a client you are migrating cannot change the `cx` it sends.
 
-Available profile keys: `engines`, `categories`, `site`, `language`, `description`. All optional.
+Available profile keys: `engines`, `categories`, `sites`, `exclude`, `language`, `pagemap`, `description`. All optional. `site: x` from 1.2 still works as a one-entry `sites`.
+
+### Importing the site list
+
+If your PSE has more than a site or two, don't retype it. Download the annotations and context files from the engine's **Overview** page in the control panel (**Download**, under **Search features**), then:
+
+```bash
+npx cse-bridge@latest import annotations.xml context.xml --cx 012345678901234567890:abcdefghij
+```
+
+That prints a profile with `sites` and `exclude` taken from the engine's own include and exclude labels. Add `--write` to append it to `profiles.yml`. Annotations it can't classify, like refinement-only or boost-only labels, are listed on stderr and left out. If the engine is set to search the entire web, its site list is a boost (mode `BOOST` in the context file), not a restriction, so only its excludes come over.
+
+The bridge checks every result against the list, because some engines behind SearXNG ignore `site:`. Past 8 patterns it stops sending `site:` at all and relies on that check alone; responses then carry `x-cse-bridge-site-mode: filter-only`. The README's [Bringing your PSE over](../README.md#bringing-your-pse-over) has the details and the measured numbers.
 
 ---
 
@@ -339,6 +351,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `spelling` | Google's corrections | Only when SearXNG emits one | Thinner. |
 | `sort` | Several sort expressions | Only `date` / `date:a` / `date:d` act | Others are accepted, then ignored. |
 | Rate limits | 100 free queries/day, then paid | Whatever your SearXNG and its upstream engines tolerate | You now own this. |
+| Site-restricted `cx` | Searched Google's index of just those sites | Asks general engines, keeps only on-list results (v1.3.0+) | A narrow or long site list returns fewer results than it did on Google. |
 | `promotions`, `context` | Present for some PSEs | Absent | Rarely used. |
 
 ### Two shapes to verify in your own code

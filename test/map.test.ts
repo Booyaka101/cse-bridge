@@ -14,25 +14,9 @@ import {
 } from '../src/map.ts';
 import type { CseParams } from '../src/params.ts';
 import type { SearxngResult } from '../src/searxng.ts';
+import { cseParams } from './helpers.ts';
 
-const params = (over: Partial<CseParams> = {}): CseParams => ({
-  key: 'k',
-  cx: 'default',
-  q: 'rust async runtime',
-  num: 10,
-  start: 1,
-  hl: undefined,
-  lr: undefined,
-  safe: 'off',
-  siteSearch: undefined,
-  siteSearchFilter: undefined,
-  dateRestrict: undefined,
-  fileType: undefined,
-  exactTerms: undefined,
-  excludeTerms: undefined,
-  sort: undefined,
-  ...over,
-});
+const params = (over: Partial<CseParams> = {}): CseParams => cseParams({ q: 'rust async runtime', ...over });
 
 const result = (n: number, over: Partial<SearxngResult> = {}): SearxngResult => ({
   url: `https://example.com/page/${n}`,

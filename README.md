@@ -134,12 +134,13 @@ SEARXNG_URL=http://localhost:8888 cse-bridge
 ```
 
 ```
-cse-bridge 1.1.0
+cse-bridge 1.3.0
   listening   http://localhost:8080
   endpoint    http://localhost:8080/customsearch/v1
   backend     http://localhost:8888
   profiles    default, docs, news, code (from profiles.yml)
   auth        disabled (any key accepted)
+  pagemap     off
 ```
 
 Requires Node 22 or newer. The package has **zero runtime dependencies**.
@@ -197,7 +198,7 @@ default:
 
 docs:
   categories: [general]
-  site: docs.rs          # every query on this cx gets an implicit site: filter
+  sites: [docs.rs, doc.rust-lang.org]   # only results from these sites
 
 news:
   categories: [news]
@@ -205,6 +206,36 @@ news:
 ```
 
 An unknown `cx` falls back to `default` — never an error, because a migrating client cannot change the `cx` it sends.
+
+### Bringing your PSE over
+
+Most Programmable Search Engines are a list of sites, and Google lets you download that list. On your engine's **Overview** page in the control panel, click **Download** in the **Search features** section, once for the annotations file and once for the context file. Then, in the directory with `docker-compose.yml`:
+
+```bash
+npx cse-bridge@latest import annotations.xml context.xml --cx 0123456789abcdef0 --write
+docker compose restart cse-bridge
+curl 'http://localhost:8080/customsearch/v1?key=k&cx=0123456789abcdef0&q=diet'
+```
+
+Use the `cx` your clients already send. `--write` appends a profile to `./profiles.yml` (or `$PROFILES_FILE`) and won't overwrite a `cx` that is already there. Leave it off to print the YAML and look first. The context file is what says which label means "include" and which means "exclude"; the import can guess from Google's default label names without it, but pass it if you have it. It is also the only way to tell an engine set to search the entire web: there the site list is only boosted (mode `BOOST`), the bridge has no boost, and just the excludes are imported.
+
+A PSE covering WebMD's health pages but not its cancer section comes out as:
+
+```yaml
+webmd:
+  sites:
+    - "www.webmd.com/hw/*"
+  exclude:
+    - "www.webmd.com/hw/cancer/*"
+```
+
+`sites` and `exclude` use Google's pattern syntax. A bare host (`example.com`) covers the host and all its subdomains, and so does `*.example.com`. `example.com/docs/*` is everything under `/docs`. A pattern with no star is that one page. Excludes win over includes. The 1.2 form `site: docs.rs` still works and means `sites: [docs.rs]`.
+
+The list is enforced by checking every result the backend returns, before anything is paged or counted. That check is the part doing the work. SearXNG passes `site:` through to each engine, and not every engine honours it: with a three-site profile and 20 queries, SearXNG's bing engine returned 193 of 196 results from other sites. Through the check, none, but also very little at all: bing kept 3 results across those 20 queries. So point a site-restricted cx at engines that honour `site:` (`engines:` on the profile). In the same run `google cse` returned 70 of 70 on-list. Every response on a site-restricted cx carries `x-cse-bridge-off-list`, the number of distinct backend results the check has thrown away for that query, so a leaky engine shows up as a big number next to a short page.
+
+Up to 8 patterns also go to the backend as `(site:a OR site:b ...)`, so the engines do most of the narrowing and the check catches the rest. A longer list is sent with no `site:` at all, only the check enforces it, and the response carries `x-cse-bridge-site-mode: filter-only` so you can tell. Expect fewer results per query in that mode, since the engines are searching the whole web and most of it gets dropped. The bridge fetches up to 12 backend pages per query looking for on-list results.
+
+A client's `siteSearch` can narrow a cx but not widen it. `siteSearch=x` searches `x` within the cx's list, and `siteSearchFilter=e` removes `x` from it.
 
 ### Endpoints
 
@@ -227,7 +258,7 @@ A few behaviours are worth knowing:
 - **`num` above 10 clamps to 10** instead of erroring. Google rejects it; clamping is friendlier and keeps `start=1,11,21` loops walking.
 - **`start` above 91 returns Google's exact error envelope**, including `status: "INVALID_ARGUMENT"` and `errors[0].reason: "badRequest"`.
 - **`dateRestrict`** (`d7`, `m6`, …) maps onto SearXNG's coarser `day`/`week`/`month`/`year` buckets, always rounding **up** — you get a superset of what you asked for, never a subset.
-- **`siteSearch`, `fileType`, `exactTerms`, `excludeTerms`** become search operators in the backend query, since SearXNG has no dedicated parameters for them.
+- **`siteSearch`, `fileType`, `exactTerms`, `excludeTerms`** become search operators in the backend query, since SearXNG has no dedicated parameters for them. `siteSearch` is also checked against every result, and stays inside the cx's site list (see [Bringing your PSE over](#bringing-your-pse-over)).
 - **`sort=date`** reorders by the `publishedDate` SearXNG attaches to news and paper results; undated results keep their relevance order and sit last.
 - **`searchType=image`** switches to SearXNG's `images` category — see [Image search](#image-search) below. `image` is the only accepted value, exactly as on Google.
 - **`imgSize`, `imgType`, `imgColorType`, `imgDominantColor`** are validated against Google's exact enums (an out-of-enum value gets Google's 400, because Google rejects it too) and then accepted for compatibility — SearXNG has no size/type/color parameters to map them onto, so they do not filter anything. Same posture as `sort` expressions beyond `date`.
@@ -419,6 +450,7 @@ Worth knowing before you migrate:
 - **No `spelling` unless SearXNG produces a correction**; it is thinner than Google's.
 - **Result quality is your SearXNG's**, not Google's. Which engines are enabled, and whether they are being rate-limited, decides what you get. Check `unresponsive_engines` on your instance if results look thin.
 - **`sort` beyond `date`** is accepted and validated but has no backend to act on.
+- **A site list is a filter, not an index.** Google searched its index of just those sites. The bridge asks general engines and keeps what matches, so a narrow or long list returns fewer results than your PSE did. Refinement labels, boosts and weights from the PSE are not imported.
 - **Not a Google account substitute.** Nothing here talks to Google.
 
 ---
@@ -431,9 +463,9 @@ npm test
 ```
 
 ```
-# tests 196
-# suites 41
-# pass 196
+# tests 268
+# suites 51
+# pass 268
 # fail 0
 ```
 

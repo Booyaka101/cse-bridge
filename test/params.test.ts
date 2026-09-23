@@ -13,6 +13,7 @@ import {
   type CseParams,
 } from '../src/params.ts';
 import { ApiError } from '../src/errors.ts';
+import { cseParams } from './helpers.ts';
 
 function parse(qs: string): CseParams {
   return parseParams(new URLSearchParams(qs));
@@ -193,24 +194,7 @@ describe('siteSearchFilter and sort', () => {
 });
 
 describe('buildQueryString', () => {
-  const base = (over: Partial<CseParams> = {}): CseParams => ({
-    key: undefined,
-    cx: 'default',
-    q: 'widgets',
-    num: 10,
-    start: 1,
-    hl: undefined,
-    lr: undefined,
-    safe: 'off',
-    siteSearch: undefined,
-    siteSearchFilter: undefined,
-    dateRestrict: undefined,
-    fileType: undefined,
-    exactTerms: undefined,
-    excludeTerms: undefined,
-    sort: undefined,
-    ...over,
-  });
+  const base = (over: Partial<CseParams> = {}): CseParams => cseParams({ q: 'widgets', ...over });
 
   test('plain query passes through untouched', () => {
     assert.equal(buildQueryString(base(), undefined), 'widgets');

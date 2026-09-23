@@ -12,6 +12,7 @@
  */
 
 import { invalidArgument } from './errors.ts';
+import { parseSitePattern } from './profiles.ts';
 
 export const MAX_NUM = 10;
 export const MAX_START = 91;
@@ -229,19 +230,74 @@ function enumParam<T extends string>(
 }
 
 /**
- * Fold the operator-ish CSE params (siteSearch, fileType, exactTerms,
- * excludeTerms) plus the profile's site restriction into a single SearXNG
- * query string, since SearXNG has no dedicated parameters for them.
+ * Most `site:` terms sent to the backend in one OR group. Engines differ in how
+ * long a query they honour, and past a handful of ORs some quietly drop the
+ * operator, so a longer list is enforced by the post-filter alone.
  */
-export function buildQueryString(params: CseParams, profileSite: string | undefined): string {
-  const parts: string[] = [params.q];
+export const MAX_SITE_OPERATORS = 8;
 
-  const site = params.siteSearch ?? profileSite;
-  if (site) {
-    // An explicit siteSearch with filter 'e' excludes; everything else includes.
-    const exclude = params.siteSearch !== undefined && params.siteSearchFilter === 'e';
-    parts.push(`${exclude ? '-' : ''}site:${site}`);
+/** Where a request may return results from, and how that reaches the backend. */
+export interface SiteScope {
+  /** `site:` terms for the backend query, already joined into one clause each. */
+  operators: string[];
+  /** Every result must match one of these (empty: no restriction)... */
+  sites: string[];
+  /** ...and one of these too: a client `siteSearch` narrowing the cx. */
+  narrow: string[];
+  /** ...and none of these. */
+  exclude: string[];
+  /** The profile's list was too long to send, so only the post-filter enforces it. */
+  filterOnly: boolean;
+}
+
+function siteOperand(raw: string): string {
+  return parseSitePattern(raw)?.operand ?? raw;
+}
+
+function orGroup(sites: readonly string[]): string {
+  const terms = [...new Set(sites.map((s) => `site:${siteOperand(s)}`))];
+  return terms.length === 1 ? terms[0]! : `(${terms.join(' OR ')})`;
+}
+
+/**
+ * Combine a profile's site list with the client's `siteSearch`. The client can
+ * only narrow the cx, never widen it: an include becomes the one backend
+ * `site:` term but results must still pass the profile, and an exclude is
+ * added on top of the profile's includes rather than replacing them.
+ */
+export function siteScope(
+  params: Pick<CseParams, 'siteSearch' | 'siteSearchFilter'>,
+  profileSites: readonly string[],
+  profileExclude: readonly string[] = [],
+): SiteScope {
+  const sites = [...profileSites];
+  const exclude = [...profileExclude];
+  const narrow: string[] = [];
+  const operators: string[] = [];
+  const fits = sites.length <= MAX_SITE_OPERATORS;
+
+  if (params.siteSearch !== undefined && params.siteSearchFilter !== 'e') {
+    narrow.push(params.siteSearch);
+    operators.push(`site:${siteOperand(params.siteSearch)}`);
+    return { operators, sites, narrow, exclude, filterOnly: false };
   }
+  if (sites.length > 0 && fits) operators.push(orGroup(sites));
+  if (params.siteSearch !== undefined) {
+    exclude.push(params.siteSearch);
+    operators.push(`-site:${siteOperand(params.siteSearch)}`);
+  }
+  return { operators, sites, narrow, exclude, filterOnly: !fits };
+}
+
+/**
+ * Fold the operator-ish CSE params (siteSearch, fileType, exactTerms,
+ * excludeTerms) plus the profile's site list into a single SearXNG query
+ * string, since SearXNG has no dedicated parameters for them. `profileSites`
+ * also takes the single string 1.2 callers passed.
+ */
+export function buildQueryString(params: CseParams, profileSites: string | readonly string[] | undefined): string {
+  const sites = profileSites === undefined ? [] : typeof profileSites === 'string' ? [profileSites] : profileSites;
+  const parts: string[] = [params.q, ...siteScope(params, sites).operators];
 
   if (params.fileType) parts.push(`filetype:${params.fileType}`);
   if (params.exactTerms) parts.push(`"${params.exactTerms.replace(/"/g, '')}"`);

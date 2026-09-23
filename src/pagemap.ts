@@ -20,6 +20,7 @@
  */
 
 import { trim } from './cache.ts';
+import { attributesOf, decodeEntities, TAG_BODY } from './markup.ts';
 import { USER_AGENT } from './searxng.ts';
 
 /** One DataObject: Google's `Attribute name/value` pairs, flattened to JSON. */
@@ -60,38 +61,6 @@ export function headOf(html: string): string {
   return end === null ? html : html.slice(0, end.index + end[0].length);
 }
 
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-};
-
-export function decodeEntities(text: string): string {
-  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, body: string) => {
-    if (body.startsWith('#')) {
-      const code = body[1] === 'x' || body[1] === 'X' ? Number.parseInt(body.slice(2), 16) : Number(body.slice(1));
-      if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff) return whole;
-      try {
-        return String.fromCodePoint(code);
-      } catch {
-        return whole;
-      }
-    }
-    return NAMED_ENTITIES[body.toLowerCase()] ?? whole;
-  });
-}
-
-const ATTRIBUTE_RE = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
-
-/**
- * The inside of one tag with quoted values respected, so `content="a > b"` does
- * not end the tag early and lose the whole meta. The three branches begin with
- * different characters, which keeps matching linear on malformed markup.
- */
-const TAG_BODY = String.raw`(?:"[^"]*"|'[^']*'|[^>"'])*`;
 const META_RE = new RegExp(String.raw`<meta\b(${TAG_BODY})>`, 'gi');
 const SCRIPT_RE = new RegExp(String.raw`<script\b(${TAG_BODY})>([\s\S]*?)</script\s*>`, 'gi');
 const ELEMENT_RE = new RegExp(String.raw`<([a-zA-Z][a-zA-Z0-9-]*)\b(${TAG_BODY})>`, 'g');
@@ -99,19 +68,6 @@ const DATA_OBJECT_RE = new RegExp(String.raw`<DataObject\b(${TAG_BODY})>([\s\S]*
 // Lazy body here so the self-closing branch wins: a greedy one would swallow
 // the `/` and run the text-content branch on to the NEXT Attribute's close.
 const PAGEMAP_ATTRIBUTE_RE = new RegExp(String.raw`<Attribute\b(${TAG_BODY}?)(?:/>|>([\s\S]*?)</Attribute\s*>)`, 'gi');
-
-/** Attribute name (lowercased) -> decoded value, for the inside of one tag. */
-export function attributesOf(tagBody: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  ATTRIBUTE_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = ATTRIBUTE_RE.exec(tagBody)) !== null) {
-    const name = m[1]!.toLowerCase();
-    if (name in out) continue;
-    out[name] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
-  }
-  return out;
-}
 
 function stripComments(html: string): string {
   return html.replace(/<!--[\s\S]*?-->/g, ' ');
