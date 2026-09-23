@@ -14,6 +14,7 @@
  */
 
 import { trim } from './cache.ts';
+import { canOverlap, matchUrl } from './profiles.ts';
 import { backendUnavailable, rateLimited } from './errors.ts';
 
 /**
@@ -63,6 +64,14 @@ export interface SearchOptions {
   timeRange?: 'day' | 'week' | 'month' | 'year' | null | undefined;
   engines?: string[];
   categories?: string[];
+  /**
+   * Post-filter: a result is kept only if its page URL is in `sites`, in
+   * `narrow`, and not in `exclude` (see matchUrl). Empty lists do not restrict.
+   * Never sent to SearXNG, which cannot be trusted to honour `site:`.
+   */
+  sites?: string[];
+  narrow?: string[];
+  exclude?: string[];
 }
 
 export interface SearxngClientOptions {
@@ -96,6 +105,10 @@ export const DEFAULT_CACHE_MAX = 256;
 interface ResultSet {
   results: SearxngResult[];
   seen: Set<string>;
+  /** Results the post-filter dropped, so a page of nothing but those still counts as new. */
+  dropped: Set<string>;
+  /** Per engine, how many of `dropped` it returned. */
+  droppedBy: Map<string, number>;
   /** Highest backend page already merged in. */
   pagesFetched: number;
   /** The backend stopped producing anything new. */
@@ -236,6 +249,10 @@ export class SearxngClient {
     hasMore: boolean;
     pagesFetched: number;
     cached: boolean;
+    /** Distinct backend results the site post-filter has dropped for this query so far. */
+    dropped: number;
+    /** The same results by the engine that returned them, most first. */
+    droppedBy: [engine: string, count: number][];
   }> {
     const needed = start - 1 + num;
     const key = cacheKey(opts);
@@ -253,8 +270,10 @@ export class SearxngClient {
         set = undefined;
       }
       if (set === undefined) {
-        set = { results: [], seen: new Set(), pagesFetched: 0, exhausted: false, expiresAt: now + this.cacheTtlMs };
+        set = { results: [], seen: new Set(), dropped: new Set(), droppedBy: new Map(), pagesFetched: 0, exhausted: false, expiresAt: now + this.cacheTtlMs };
       }
+
+      if (!canOverlap(opts.narrow ?? [], opts.sites ?? [])) set.exhausted = true;
 
       // Resume from wherever the cached set stopped; fetch only what is missing.
       while (!set.exhausted && set.results.length <= needed && set.pagesFetched < this.maxPages) {
@@ -262,16 +281,27 @@ export class SearxngClient {
         const res = await this.searchPage({ ...opts, pageno: page });
         set.pagesFetched = page;
         pagesFetchedNow++;
-        const before = set.results.length;
+        let fresh = 0;
         for (const r of res.results) {
           if (typeof r?.url !== 'string' || r.url.length === 0) continue;
           const norm = dedupeKey(r);
+          // Filter before de-duplicating: an off-list copy of an image must not
+          // shadow an on-list one that shares its img_src.
+          if (!inScope(r.url, opts)) {
+            if (!set.dropped.has(norm) && !set.seen.has(norm)) fresh++;
+            if (!set.dropped.has(norm)) {
+              for (const e of r.engines ?? (r.engine ? [r.engine] : [])) set.droppedBy.set(e, (set.droppedBy.get(e) ?? 0) + 1);
+            }
+            set.dropped.add(norm);
+            continue;
+          }
           if (set.seen.has(norm)) continue;
           set.seen.add(norm);
           set.results.push(r);
+          fresh++;
         }
-        // Nothing new on this page: the backend has run dry, stop walking.
-        if (set.results.length === before) {
+        // Nothing new on this page, kept or dropped: the backend has run dry.
+        if (fresh === 0) {
           set.exhausted = true;
           break;
         }
@@ -309,6 +339,8 @@ export class SearxngClient {
       hasMore,
       pagesFetched: pagesFetchedNow,
       cached: pagesFetchedNow === 0,
+      dropped: set.dropped.size,
+      droppedBy: [...set.droppedBy].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
     };
   }
 
@@ -318,11 +350,18 @@ export class SearxngClient {
   }
 }
 
+function inScope(url: string, opts: Omit<SearchOptions, 'pageno'>): boolean {
+  return matchUrl(url, opts.sites ?? [], opts.exclude ?? []) && matchUrl(url, opts.narrow ?? [], []);
+}
+
 /**
- * Cache identity of a query. Every field that changes what the backend returns
- * must be in here, or two different searches would share one result set.
+ * Cache identity of a query. Every field that changes what the result set
+ * holds must be in here, or two different searches would share one. That
+ * includes the site lists: past MAX_SITE_OPERATORS two profiles send the same
+ * query string and differ only in what the post-filter keeps.
  */
-function cacheKey(opts: Omit<SearchOptions, 'pageno'>): string {
+export function cacheKey(opts: Omit<SearchOptions, 'pageno'>): string {
+  const sorted = (list: string[] | undefined): string[] => [...(list ?? [])].sort();
   return JSON.stringify([
     opts.query,
     opts.language ?? '',
@@ -330,6 +369,9 @@ function cacheKey(opts: Omit<SearchOptions, 'pageno'>): string {
     opts.timeRange ?? '',
     (opts.engines ?? []).join(','),
     (opts.categories ?? []).join(','),
+    sorted(opts.sites),
+    sorted(opts.narrow),
+    sorted(opts.exclude),
   ]);
 }
 

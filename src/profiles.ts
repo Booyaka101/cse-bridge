@@ -15,6 +15,9 @@
  *   name:                 one level of nested mapping (the profile block)
  *     key: value
  *   # comments and blank lines
+ *
+ * `sites` and `exclude` carry a Programmable Search Engine's site list. Each
+ * entry is a pattern in Google's annotation style, see {@link matchUrl}.
  */
 
 import { readFileSync } from 'node:fs';
@@ -24,7 +27,14 @@ export interface Profile {
   engines: string[];
   /** SearXNG `categories=`. Empty means "instance default". */
   categories: string[];
-  /** Implicit `site:` restriction applied to every query on this cx. */
+  /**
+   * Site patterns this cx is restricted to. Empty means no restriction. The
+   * `site:` key is accepted as sugar for a one-entry list.
+   */
+  sites: string[];
+  /** Site patterns never returned on this cx. Excludes win over `sites`. */
+  exclude: string[];
+  /** @deprecated The first entry of `sites`, kept for 1.2 callers. */
   site: string | undefined;
   /** Default language when the client sends neither `lr` nor `hl`. */
   language: string | undefined;
@@ -41,6 +51,8 @@ export interface Profile {
 export const DEFAULT_PROFILE: Profile = {
   engines: [],
   categories: [],
+  sites: [],
+  exclude: [],
   site: undefined,
   language: undefined,
   pagemap: undefined,
@@ -85,6 +97,29 @@ function unquote(raw: string): string {
   return s;
 }
 
+/**
+ * Where "key: value" splits. YAML only treats a colon followed by a space (or
+ * the end of the line) as the separator, which is what lets an old-style cx
+ * like `017576662512468239146:omuauf_lfve:` be a key. A line with no such
+ * colon falls back to the first one, as this parser always accepted `key:value`.
+ */
+function keySeparator(content: string): number {
+  let inSingle = false;
+  let inDouble = false;
+  let first = -1;
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === ':' && !inSingle && !inDouble) {
+      const next = content[i + 1];
+      if (next === undefined || /\s/.test(next)) return i;
+      if (first === -1) first = i;
+    }
+  }
+  return first;
+}
+
 function scalar(raw: string): YamlValue {
   const s = raw.trim();
   if (s === '' || s === '~' || s.toLowerCase() === 'null') return null;
@@ -103,7 +138,8 @@ export function parseYaml(text: string): YamlDoc {
   let currentBlockName = '';
   let pendingListKey: string | null = null;
 
-  const lines = text.split(/\r?\n/);
+  // Windows editors can save UTF-8 with a BOM, which would otherwise indent the first key.
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i] ?? '';
     const line = stripComment(rawLine);
@@ -125,7 +161,7 @@ export function parseYaml(text: string): YamlDoc {
       continue;
     }
 
-    const sep = content.indexOf(':');
+    const sep = keySeparator(content);
     if (sep === -1) {
       throw new ProfilesError(`profiles: line ${i + 1}: expected "key: value", got ${JSON.stringify(content)}`);
     }
@@ -194,11 +230,187 @@ function asBoolean(value: YamlValue | undefined, key: string, profile: string): 
   throw new ProfilesError(`profiles: ${profile}.${key} must be true or false, got ${JSON.stringify(raw)}`);
 }
 
+/** A site pattern, parsed once. */
+export interface SitePattern {
+  /** Lowercase, punycode, without a leading `*.`. */
+  host: string;
+  /** Whether subdomains of `host` match too. */
+  subdomains: boolean;
+  /** Matcher for the path (and query, when the pattern has one). Undefined matches any path. */
+  path: RegExp | undefined;
+  withQuery: boolean;
+  /** Canonical form: no scheme, normalized host. */
+  text: string;
+  /** What goes after a backend `site:` operator: host plus the path up to the first wildcard. */
+  operand: string;
+}
+
+const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * Parse `host`, `*.host`, `host/path`, `host/path*` or any of those with a
+ * scheme in front. Undefined when the text cannot be a site pattern.
+ */
+export function parseSitePattern(raw: string): SitePattern | undefined {
+  const text = raw.trim().replace(SCHEME, '').replace(/^\/\//, '');
+  if (text === '' || /[\s"\\#]/.test(text)) return undefined;
+  const slash = text.search(/[/?]/);
+  let hostPart = slash === -1 ? text : text.slice(0, slash);
+  const pathPart = slash === -1 ? '' : text.slice(slash);
+  const wildcard = hostPart.startsWith('*.');
+  if (wildcard) hostPart = hostPart.slice(2);
+  if (hostPart === '' || hostPart.includes('*') || hostPart.includes('@')) return undefined;
+
+  let url: URL;
+  try {
+    // Going through URL is what lowercases the host, turns an IDN into
+    // punycode and percent-encodes the path exactly as result URLs will be.
+    url = new URL(`http://${hostPart}${pathPart}`);
+  } catch {
+    return undefined;
+  }
+  // Result URLs are matched by host alone, so a port could only widen the pattern.
+  if (url.port !== '') return undefined;
+  const host = url.hostname.replace(/\.$/, '');
+  if (pathPart === '') {
+    // A bare host means the host and everything under it, like `site:`.
+    return { host, subdomains: true, path: undefined, withQuery: false, text: host, operand: host };
+  }
+  const pathText = upperEscapes(url.pathname + url.search);
+  const prefix = pathText.split(/[*?]/, 1)[0]!.replace(/\/+$/, '');
+  return {
+    host,
+    subdomains: wildcard,
+    path: globToRegExp(pathText),
+    withQuery: url.search !== '',
+    text: `${wildcard ? '*.' : ''}${host}${pathText}`,
+    operand: host + prefix,
+  };
+}
+
+/**
+ * The site pattern a `site:` operator value means, for the `site` profile key
+ * and the `siteSearch` parameter. Unlike a PSE pattern, a path without a star
+ * covers everything under it, and `host/` is the whole host.
+ */
+export function operatorPattern(raw: string): string {
+  const text = raw.trim().replace(SCHEME, '').replace(/^\/\//, '');
+  const slash = text.indexOf('/');
+  if (slash === -1 || /[*?]/.test(text.slice(slash))) return text;
+  let end = text.length;
+  while (end > slash && text[end - 1] === '/') end--;
+  const path = text.slice(slash, end);
+  return path === '' ? text.slice(0, slash) : `${text.slice(0, slash)}${path}/*`;
+}
+
+/** `%c3%a9` and `%C3%A9` are the same path; URL only normalizes the ones it encodes itself. */
+function upperEscapes(path: string): string {
+  return path.replace(/%[0-9a-f]{2}/gi, (m) => m.toUpperCase());
+}
+
+/**
+ * `*` matches anything. A trailing `/*` also matches the directory itself
+ * (`/hw/*` covers `/hw`), and a pattern with no trailing `*` is one page, with
+ * or without its trailing slash.
+ */
+function globToRegExp(pathText: string): RegExp {
+  let body = pathText;
+  let tail: string;
+  if (body.endsWith('/*')) {
+    body = body.slice(0, -2);
+    tail = '(?:/.*)?';
+  } else if (body.endsWith('*')) {
+    body = body.slice(0, -1);
+    tail = '.*';
+  } else {
+    body = body.replace(/\/+$/, '');
+    tail = '/?';
+  }
+  const source = body
+    .split('*')
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${source}${tail}$`);
+}
+
+const PATTERN_CACHE_MAX = 10_000;
+const parsedPatterns = new Map<string, SitePattern | undefined>();
+
+function cachedPattern(raw: string): SitePattern | undefined {
+  if (parsedPatterns.has(raw)) return parsedPatterns.get(raw);
+  if (parsedPatterns.size >= PATTERN_CACHE_MAX) parsedPatterns.clear();
+  const parsed = parseSitePattern(raw);
+  parsedPatterns.set(raw, parsed);
+  return parsed;
+}
+
+function patternMatches(pattern: SitePattern | undefined, url: URL): boolean {
+  if (pattern === undefined) return false;
+  const host = url.hostname.replace(/\.$/, '');
+  if (host !== pattern.host && !(pattern.subdomains && host.endsWith(`.${pattern.host}`))) return false;
+  return pattern.path === undefined || pattern.path.test(upperEscapes(url.pathname + (pattern.withQuery ? url.search : '')));
+}
+
+/**
+ * Whether some URL could match both a narrowing pattern and one of `sites`.
+ * Hosts only, so it can answer yes for a pair that turns out disjoint, never
+ * the reverse. Lets a request that cannot return anything skip the backend.
+ */
+export function canOverlap(narrow: readonly string[], sites: readonly string[]): boolean {
+  if (narrow.length === 0 || sites.length === 0) return true;
+  return narrow.some((n) => {
+    const a = cachedPattern(n);
+    return a !== undefined && sites.some((s) => {
+      const b = cachedPattern(s);
+      if (b === undefined) return false;
+      return a.host === b.host || (b.subdomains && a.host.endsWith(`.${b.host}`)) || (a.subdomains && b.host.endsWith(`.${a.host}`));
+    });
+  });
+}
+
+/**
+ * Whether `url` is inside a site list. Excludes win over includes, and an
+ * empty `sites` means no include restriction. Patterns are the ones
+ * {@link parseSitePattern} reads; one it cannot read matches nothing, so a
+ * broken include fails closed rather than letting the whole web through.
+ */
+export function matchUrl(url: string, sites: readonly string[], exclude: readonly string[]): boolean {
+  if (sites.length === 0 && exclude.length === 0) return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (exclude.some((p) => patternMatches(cachedPattern(p), parsed))) return false;
+  return sites.length === 0 || sites.some((p) => patternMatches(cachedPattern(p), parsed));
+}
+
+/** A profile's site list in canonical form. A pattern it cannot read is an error. */
+function asSiteList(values: string[], key: string, profile: string, read: (raw: string) => string = (raw) => raw): string[] {
+  return values.map((raw) => {
+    const pattern = parseSitePattern(read(raw));
+    if (pattern === undefined) {
+      throw new ProfilesError(`profiles: ${profile}.${key} has an entry that is not a site pattern: ${JSON.stringify(raw)}`);
+    }
+    return pattern.text;
+  });
+}
+
 function toProfile(name: string, block: Record<string, YamlValue>): Profile {
+  // `site` predates `sites` and keeps the `site:` operator's meaning.
+  const sites = [
+    ...new Set([
+      ...asSiteList(asList(block['site']), 'site', name, operatorPattern),
+      ...asSiteList(asList(block['sites']), 'sites', name),
+    ]),
+  ];
   return {
     engines: asList(block['engines']),
     categories: asList(block['categories']),
-    site: asString(block['site']),
+    sites,
+    exclude: [...new Set(asSiteList(asList(block['exclude']), 'exclude', name))],
+    site: sites[0],
     language: asString(block['language']),
     pagemap: asBoolean(block['pagemap'], 'pagemap', name),
     description: asString(block['description']),

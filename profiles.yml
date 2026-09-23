@@ -5,7 +5,12 @@
 # Keys per profile (all optional):
 #   engines:     SearXNG engine names. Empty = whatever the instance enables.
 #   categories:  SearXNG categories, e.g. general, news, it, science.
-#   site:        implicit site: restriction applied to every query on this cx.
+#   sites:       only return results from these sites. Google's PSE patterns:
+#                example.com (and its subdomains), *.example.com,
+#                example.com/docs/* (a path), example.com/page (one page).
+#                `cse-bridge import` writes this from your PSE's own files.
+#   exclude:     never return results from these, even if `sites` matches.
+#   site:        1.2 spelling of a one-entry `sites`; still accepted.
 #   language:    fallback language when the client sends neither lr nor hl.
 #   pagemap:     true|false. Reconstruct item.pagemap for this cx by fetching
 #                result pages. Overrides CSE_BRIDGE_PAGEMAP either way; omit
@@ -22,7 +27,7 @@ default:
 docs:
   description: Documentation-only search.
   categories: [general]
-  site: docs.rs
+  sites: [docs.rs]
   # pagemap: true        # rebuild item.pagemap for this cx, see README
 
 news:

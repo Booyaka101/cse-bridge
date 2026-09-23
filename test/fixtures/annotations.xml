@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Annotations start="0" num="6" total="6">
+  <Annotation about="www.webmd.com/hw/*" score="1" timestamp="0x0005f1c2d3e4a5b6">
+    <Label name="_cse_abcdefghijk"/>
+    <Label name="nutrition"/>
+    <Comment>Health articles</Comment>
+  </Annotation>
+  <Annotation about="https://www.webmd.com/hw/cancer/*" score="1">
+    <Label name="_cse_exclude_abcdefghijk"/>
+  </Annotation>
+  <Annotation about="*.MayoClinic.org/*" score="1">
+    <Label name="_cse_abcdefghijk"/>
+  </Annotation>
+  <!-- <Annotation about="commented-out.example/*"><Label name="_cse_abcdefghijk"/></Annotation> -->
+  <Annotation about="www.nhs.uk/conditions" score="0.8">
+    <Label name='_cse_abcdefghijk'/>
+    <Comment>One page, &amp; its trailing-slash twin</Comment>
+  </Annotation>
+  <Annotation about="bücher.example/diät/*" score="1">
+    <Label name="_cse_abcdefghijk"/>
+  </Annotation>
+  <Annotation about="forum.example.org/*" score="1">
+    <Label name="boost_only"/>
+  </Annotation>
+</Annotations>

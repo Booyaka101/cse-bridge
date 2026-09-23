@@ -10,26 +10,7 @@ import assert from 'node:assert/strict';
 
 import { SearxngClient, type SearxngResult } from '../src/searxng.ts';
 import { mapResponse } from '../src/map.ts';
-import type { CseParams } from '../src/params.ts';
-
-const params = (over: Partial<CseParams> = {}): CseParams => ({
-  key: 'k',
-  cx: 'default',
-  q: 'test',
-  num: 10,
-  start: 1,
-  hl: undefined,
-  lr: undefined,
-  safe: 'off',
-  siteSearch: undefined,
-  siteSearchFilter: undefined,
-  dateRestrict: undefined,
-  fileType: undefined,
-  exactTerms: undefined,
-  excludeTerms: undefined,
-  sort: undefined,
-  ...over,
-});
+import { cseParams as params } from './helpers.ts';
 
 /**
  * A fake SearXNG whose page size deliberately does NOT match Google's 10, and

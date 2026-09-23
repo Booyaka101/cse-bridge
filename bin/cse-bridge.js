@@ -19,6 +19,10 @@ const HELP = `cse-bridge ${pkg.version}
 
 USAGE
   cse-bridge                      start the bridge
+  cse-bridge import <annotations.xml> [context.xml] --cx NAME [--write]
+                                  turn a Programmable Search Engine's
+                                  downloaded site list into a profile. Prints
+                                  YAML, or appends it to PROFILES_FILE
   cse-bridge --help               show this message
   cse-bridge --version            print the version
 
@@ -59,8 +63,33 @@ EXAMPLE
   curl 'http://localhost:8080/customsearch/v1?key=k&cx=default&q=rust+async&num=3'
 `;
 
+async function loadDist(name) {
+  try {
+    return await import(`../dist/${name}.js`);
+  } catch (err) {
+    process.stderr.write(
+      `cse-bridge: build output is missing (dist/${name}.js).\n` +
+        `If you are running from a git checkout, run 'npm install && npm run build' first.\n` +
+        `Underlying error: ${err && err.message ? err.message : err}\n`,
+    );
+    process.exitCode = 1;
+    return undefined;
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+  if (argv[0] === 'import' && !argv.includes('--help') && !argv.includes('-h')) {
+    const mod = await loadDist('import');
+    if (!mod) return;
+    process.exitCode = mod.runImport(argv.slice(1), {
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+      env: process.env,
+      cwd: process.cwd(),
+    });
+    return;
+  }
   if (argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(HELP);
     return;
@@ -75,19 +104,14 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-
-  let mod;
-  try {
-    mod = await import('../dist/server.js');
-  } catch (err) {
-    process.stderr.write(
-      `cse-bridge: build output is missing (dist/server.js).\n` +
-        `If you are running from a git checkout, run 'npm install && npm run build' first.\n` +
-        `Underlying error: ${err && err.message ? err.message : err}\n`,
-    );
-    process.exitCode = 1;
+  if (argv.length > 0) {
+    process.stderr.write(`cse-bridge: unknown command ${argv[0]}\nRun 'cse-bridge --help'.\n`);
+    process.exitCode = 2;
     return;
   }
+
+  const mod = await loadDist('server');
+  if (!mod) return;
 
   let bridge;
   try {

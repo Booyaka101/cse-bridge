@@ -13,6 +13,7 @@ import {
   type CseParams,
 } from '../src/params.ts';
 import { ApiError } from '../src/errors.ts';
+import { cseParams } from './helpers.ts';
 
 function parse(qs: string): CseParams {
   return parseParams(new URLSearchParams(qs));
@@ -185,6 +186,15 @@ describe('siteSearchFilter and sort', () => {
     assert.match(expectApiError('q=a&cx=c&siteSearchFilter=include').detail, /siteSearchFilter/);
   });
 
+  test('a siteSearch the bridge cannot check results against is rejected, not answered empty', () => {
+    for (const bad of ['localhost:8080', 'example.com/a#b', 'user@example.com']) {
+      const err = expectApiError(`q=a&cx=c&siteSearch=${encodeURIComponent(bad)}`);
+      assert.equal(err.code, 400);
+      assert.match(err.detail, /'siteSearch'/);
+    }
+    assert.equal(parse('q=a&cx=c&siteSearch=https://example.com/blog/').siteSearch, 'https://example.com/blog/');
+  });
+
   test('sort rejects characters that would corrupt the backend query', () => {
     assert.equal(parse('q=a&cx=c&sort=date').sort, 'date');
     assert.equal(parse('q=a&cx=c&sort=date:d').sort, 'date:d');
@@ -193,24 +203,7 @@ describe('siteSearchFilter and sort', () => {
 });
 
 describe('buildQueryString', () => {
-  const base = (over: Partial<CseParams> = {}): CseParams => ({
-    key: undefined,
-    cx: 'default',
-    q: 'widgets',
-    num: 10,
-    start: 1,
-    hl: undefined,
-    lr: undefined,
-    safe: 'off',
-    siteSearch: undefined,
-    siteSearchFilter: undefined,
-    dateRestrict: undefined,
-    fileType: undefined,
-    exactTerms: undefined,
-    excludeTerms: undefined,
-    sort: undefined,
-    ...over,
-  });
+  const base = (over: Partial<CseParams> = {}): CseParams => cseParams({ q: 'widgets', ...over });
 
   test('plain query passes through untouched', () => {
     assert.equal(buildQueryString(base(), undefined), 'widgets');

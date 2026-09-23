@@ -7,7 +7,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { ApiError, invalidApiKey, missingApiKey, notFound } from './errors.ts';
-import { buildQueryString, dateRestrictToTimeRange, languageFor, parseParams, safeToSearxng } from './params.ts';
+import { buildQueryString, dateRestrictToTimeRange, languageFor, parseParams, safeToSearxng, siteScope } from './params.ts';
 import { applySort, mapResponse, type CseSearchResponse } from './map.ts';
 import { SearxngClient } from './searxng.ts';
 import { PagemapClient } from './pagemap.ts';
@@ -16,6 +16,15 @@ import { loadConfig, type Config } from './config.ts';
 
 export const SEARCH_PATH = '/customsearch/v1';
 export const HEALTH_PATH = '/healthz';
+/** Set to `filter-only` when a cx's site list was too long to send as `site:` operators. */
+export const SITE_MODE_HEADER = 'x-cse-bridge-site-mode';
+/** On a site-restricted request, how many distinct backend results were off-list and dropped. */
+export const OFF_LIST_HEADER = 'x-cse-bridge-off-list';
+/**
+ * The same drops by engine, `bing=9, qwant=1`, to spot an engine ignoring `site:`. A result
+ * several engines returned counts for each of them, so the numbers can add up to more.
+ */
+export const OFF_LIST_ENGINES_HEADER = 'x-cse-bridge-off-list-engines';
 
 export interface BridgeOptions {
   config: Config;
@@ -34,13 +43,14 @@ export interface Bridge {
   close(): Promise<void>;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   const payload = JSON.stringify(body, null, 2);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=UTF-8',
     'Content-Length': Buffer.byteLength(payload),
     'Cache-Control': 'private',
     'X-Powered-By': 'cse-bridge',
+    ...headers,
   });
   res.end(payload);
 }
@@ -68,16 +78,22 @@ function checkKey(config: Config, key: string | undefined): void {
   if (!config.keys.has(key)) throw invalidApiKey();
 }
 
-/** Run one search request end to end. Exported so tests can skip HTTP. */
+/**
+ * Run one search request end to end. Exported so tests can skip HTTP.
+ * Response headers beyond the defaults are written into `headers`.
+ */
 export async function handleSearch(
   searchParams: URLSearchParams,
   deps: { config: Config; profiles: ProfileSet; client: SearxngClient; pagemap?: PagemapClient },
+  headers: Record<string, string> = {},
 ): Promise<CseSearchResponse> {
   const params = parseParams(searchParams);
   checkKey(deps.config, params.key);
 
   const profile = deps.profiles.get(params.cx);
-  const query = buildQueryString(params, profile.site);
+  const scope = siteScope(params, profile.sites, profile.exclude);
+  if (scope.filterOnly) headers[SITE_MODE_HEADER] = 'filter-only';
+  const query = buildQueryString(params, profile.sites);
   const language = languageFor(params.lr, params.hl) ?? profile.language;
   const timeRange = params.dateRestrict ? dateRestrictToTimeRange(params.dateRestrict) : null;
 
@@ -89,7 +105,7 @@ export async function handleSearch(
   const categories = params.searchType === 'image' ? ['images'] : profile.categories;
 
   const startedAt = process.hrtime.bigint();
-  const { results } = await deps.client.fetchWindow(
+  const { results, dropped, droppedBy } = await deps.client.fetchWindow(
     {
       query,
       language,
@@ -97,11 +113,18 @@ export async function handleSearch(
       timeRange,
       engines: profile.engines,
       categories,
+      sites: scope.sites,
+      narrow: scope.narrow,
+      exclude: scope.exclude,
     },
     params.start,
     params.num,
   );
   const searchTime = Number(process.hrtime.bigint() - startedAt) / 1e9;
+  if (scope.sites.length + scope.narrow.length + scope.exclude.length > 0) {
+    headers[OFF_LIST_HEADER] = String(dropped);
+    if (droppedBy.length > 0) headers[OFF_LIST_ENGINES_HEADER] = droppedBy.map(([e, n]) => `${e}=${n}`).join(', ');
+  }
 
   // Sort before slicing: `sort=date` must reorder the whole result set, not
   // just whichever ten results happen to land on this page.
@@ -205,8 +228,9 @@ export function createBridge(opts: BridgeOptions): Bridge {
     }
 
     try {
-      const body = await handleSearch(url.searchParams, { config, profiles, client, pagemap });
-      sendJson(res, 200, body);
+      const headers: Record<string, string> = {};
+      const body = await handleSearch(url.searchParams, { config, profiles, client, pagemap }, headers);
+      sendJson(res, 200, body, headers);
       finish(200);
     } catch (err) {
       const apiErr = toApiError(err);
@@ -255,7 +279,7 @@ async function probeBackend(
   }
 }
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 /** Build a bridge from process.env. Used by bin/cse-bridge.js. */
 export function bridgeFromEnv(env: NodeJS.ProcessEnv = process.env): Bridge {
