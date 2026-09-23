@@ -138,7 +138,8 @@ export function parseYaml(text: string): YamlDoc {
   let currentBlockName = '';
   let pendingListKey: string | null = null;
 
-  const lines = text.split(/\r?\n/);
+  // Windows editors can save UTF-8 with a BOM, which would otherwise indent the first key.
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i] ?? '';
     const line = stripComment(rawLine);
@@ -251,9 +252,9 @@ const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
  * scheme in front. Undefined when the text cannot be a site pattern.
  */
 export function parseSitePattern(raw: string): SitePattern | undefined {
-  const text = raw.trim().replace(SCHEME, '');
-  if (text === '' || /[\s"]/.test(text)) return undefined;
-  const slash = text.indexOf('/');
+  const text = raw.trim().replace(SCHEME, '').replace(/^\/\//, '');
+  if (text === '' || /[\s"\\#]/.test(text)) return undefined;
+  const slash = text.search(/[/?]/);
   let hostPart = slash === -1 ? text : text.slice(0, slash);
   const pathPart = slash === -1 ? '' : text.slice(slash);
   const wildcard = hostPart.startsWith('*.');
@@ -268,12 +269,14 @@ export function parseSitePattern(raw: string): SitePattern | undefined {
   } catch {
     return undefined;
   }
-  const host = url.hostname;
+  // Result URLs are matched by host alone, so a port could only widen the pattern.
+  if (url.port !== '') return undefined;
+  const host = url.hostname.replace(/\.$/, '');
   if (pathPart === '') {
     // A bare host means the host and everything under it, like `site:`.
     return { host, subdomains: true, path: undefined, withQuery: false, text: host, operand: host };
   }
-  const pathText = url.pathname + url.search;
+  const pathText = upperEscapes(url.pathname + url.search);
   const prefix = pathText.split(/[*?]/, 1)[0]!.replace(/\/+$/, '');
   return {
     host,
@@ -283,6 +286,24 @@ export function parseSitePattern(raw: string): SitePattern | undefined {
     text: `${wildcard ? '*.' : ''}${host}${pathText}`,
     operand: host + prefix,
   };
+}
+
+/**
+ * The site pattern a `site:` operator value means, for the `site` profile key
+ * and the `siteSearch` parameter. Unlike a PSE pattern, a path without a star
+ * covers everything under it, and `host/` is the whole host.
+ */
+export function operatorPattern(raw: string): string {
+  const text = raw.trim().replace(SCHEME, '').replace(/^\/\//, '');
+  const slash = text.indexOf('/');
+  if (slash === -1 || /[*?]/.test(text.slice(slash))) return text;
+  const path = text.slice(slash).replace(/\/+$/, '');
+  return path === '' ? text.slice(0, slash) : `${text.slice(0, slash)}${path}/*`;
+}
+
+/** `%c3%a9` and `%C3%A9` are the same path; URL only normalizes the ones it encodes itself. */
+function upperEscapes(path: string): string {
+  return path.replace(/%[0-9a-f]{2}/gi, (m) => m.toUpperCase());
 }
 
 /**
@@ -323,9 +344,26 @@ function cachedPattern(raw: string): SitePattern | undefined {
 
 function patternMatches(pattern: SitePattern | undefined, url: URL): boolean {
   if (pattern === undefined) return false;
-  const host = url.hostname;
+  const host = url.hostname.replace(/\.$/, '');
   if (host !== pattern.host && !(pattern.subdomains && host.endsWith(`.${pattern.host}`))) return false;
-  return pattern.path === undefined || pattern.path.test(url.pathname + (pattern.withQuery ? url.search : ''));
+  return pattern.path === undefined || pattern.path.test(upperEscapes(url.pathname + (pattern.withQuery ? url.search : '')));
+}
+
+/**
+ * Whether some URL could match both a narrowing pattern and one of `sites`.
+ * Hosts only, so it can answer yes for a pair that turns out disjoint, never
+ * the reverse. Lets a request that cannot return anything skip the backend.
+ */
+export function canOverlap(narrow: readonly string[], sites: readonly string[]): boolean {
+  if (narrow.length === 0 || sites.length === 0) return true;
+  return narrow.some((n) => {
+    const a = cachedPattern(n);
+    return a !== undefined && sites.some((s) => {
+      const b = cachedPattern(s);
+      if (b === undefined) return false;
+      return a.host === b.host || (b.subdomains && a.host.endsWith(`.${b.host}`)) || (a.subdomains && b.host.endsWith(`.${a.host}`));
+    });
+  });
 }
 
 /**
@@ -346,26 +384,30 @@ export function matchUrl(url: string, sites: readonly string[], exclude: readonl
   return sites.length === 0 || sites.some((p) => patternMatches(cachedPattern(p), parsed));
 }
 
-/** A profile's site list in canonical form, de-duplicated. A pattern it cannot read is an error. */
-function asSiteList(values: string[], key: string, profile: string): string[] {
-  const out = new Set<string>();
-  for (const raw of values) {
-    const pattern = parseSitePattern(raw);
+/** A profile's site list in canonical form. A pattern it cannot read is an error. */
+function asSiteList(values: string[], key: string, profile: string, read: (raw: string) => string = (raw) => raw): string[] {
+  return values.map((raw) => {
+    const pattern = parseSitePattern(read(raw));
     if (pattern === undefined) {
       throw new ProfilesError(`profiles: ${profile}.${key} has an entry that is not a site pattern: ${JSON.stringify(raw)}`);
     }
-    out.add(pattern.text);
-  }
-  return [...out];
+    return pattern.text;
+  });
 }
 
 function toProfile(name: string, block: Record<string, YamlValue>): Profile {
-  const sites = asSiteList([...asList(block['site']), ...asList(block['sites'])], 'sites', name);
+  // `site` predates `sites` and keeps the `site:` operator's meaning.
+  const sites = [
+    ...new Set([
+      ...asSiteList(asList(block['site']), 'site', name, operatorPattern),
+      ...asSiteList(asList(block['sites']), 'sites', name),
+    ]),
+  ];
   return {
     engines: asList(block['engines']),
     categories: asList(block['categories']),
     sites,
-    exclude: asSiteList(asList(block['exclude']), 'exclude', name),
+    exclude: [...new Set(asSiteList(asList(block['exclude']), 'exclude', name))],
     site: sites[0],
     language: asString(block['language']),
     pagemap: asBoolean(block['pagemap'], 'pagemap', name),

@@ -20,6 +20,11 @@ export const HEALTH_PATH = '/healthz';
 export const SITE_MODE_HEADER = 'x-cse-bridge-site-mode';
 /** On a site-restricted request, how many distinct backend results were off-list and dropped. */
 export const OFF_LIST_HEADER = 'x-cse-bridge-off-list';
+/**
+ * The same drops by engine, `bing=9, qwant=1`, to spot an engine ignoring `site:`. A result
+ * several engines returned counts for each of them, so the numbers can add up to more.
+ */
+export const OFF_LIST_ENGINES_HEADER = 'x-cse-bridge-off-list-engines';
 
 export interface BridgeOptions {
   config: Config;
@@ -100,7 +105,7 @@ export async function handleSearch(
   const categories = params.searchType === 'image' ? ['images'] : profile.categories;
 
   const startedAt = process.hrtime.bigint();
-  const { results, dropped } = await deps.client.fetchWindow(
+  const { results, dropped, droppedBy } = await deps.client.fetchWindow(
     {
       query,
       language,
@@ -116,7 +121,10 @@ export async function handleSearch(
     params.num,
   );
   const searchTime = Number(process.hrtime.bigint() - startedAt) / 1e9;
-  if (scope.sites.length + scope.narrow.length + scope.exclude.length > 0) headers[OFF_LIST_HEADER] = String(dropped);
+  if (scope.sites.length + scope.narrow.length + scope.exclude.length > 0) {
+    headers[OFF_LIST_HEADER] = String(dropped);
+    if (droppedBy.length > 0) headers[OFF_LIST_ENGINES_HEADER] = droppedBy.map(([e, n]) => `${e}=${n}`).join(', ');
+  }
 
   // Sort before slicing: `sort=date` must reorder the whole result set, not
   // just whichever ten results happen to land on this page.

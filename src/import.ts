@@ -40,7 +40,7 @@ const ANNOTATION_RE = new RegExp(String.raw`<Annotation\b(${TAG_BODY}?)(?:/>|>([
 
 /** Comments are blanked rather than removed so match offsets still give the right line. */
 function stripComments(xml: string): string {
-  return xml.replace(/^﻿/, '').replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
+  return xml.replace(/^\uFEFF/, '').replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, ' '));
 }
 
 function labelNames(body: string): string[] {
@@ -164,7 +164,7 @@ export function importAnnotations(annotationsXml: string, contextXml?: string): 
   if (wholeWeb && exclude.size === 0) {
     throw new ImportError(
       `this engine searches the entire web and only boosts its ${boosted} site(s) (mode BOOST). ` +
-        'The bridge cannot boost, and a cx with no profile already searches the whole web, so there is nothing to import.',
+        'The bridge cannot boost, so there is nothing to import; a profile with no sites searches the whole web.',
     );
   }
   if (wholeWeb) {
@@ -179,12 +179,21 @@ export function importAnnotations(annotationsXml: string, contextXml?: string): 
         : 'no annotation carries one of the context file\'s include or exclude labels.',
     );
   }
-  if (sites.size === 0 && unlabelled > 0 && !wholeWeb) {
+  if (sites.size === 0 && !wholeWeb) {
     // Emitting excludes alone would turn a restricted engine into the whole web.
-    throw new ImportError(
-      `${unlabelled} annotation(s) could not be classified and none were includes, so this profile would search the whole web. ` +
-        (roles === undefined ? 'Pass the context file.' : 'Check the context file belongs to this engine.'),
-    );
+    if (unlabelled > 0) {
+      throw new ImportError(
+        `${unlabelled} annotation(s) could not be classified and none were includes, so this profile would search the whole web. ` +
+          (roles === undefined ? 'Pass the context file.' : 'Check the context file belongs to this engine.'),
+      );
+    }
+    if (roles !== undefined && [...roles.values()].includes('include')) {
+      throw new ImportError(
+        'the context file restricts this engine to an include label, but no annotation carries one, so this profile would search the whole web. ' +
+          'Check both files come from the same engine.',
+      );
+    }
+    warnings.push('only excludes were found, so this profile searches the whole web except them');
   }
   return { sites: [...sites], exclude: [...exclude], annotations, warnings };
 }
@@ -216,9 +225,13 @@ export interface ImportIo {
   cwd: string;
 }
 
+/** Exports are UTF-8, but a file re-saved from Notepad as "Unicode" is UTF-16 with a BOM. */
 function readInput(path: string, cwd: string): string {
   try {
-    return readFileSync(resolve(cwd, path), 'utf8');
+    const bytes = readFileSync(resolve(cwd, path));
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) return bytes.subarray(2).toString('utf16le');
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) return Buffer.from(bytes.subarray(2)).swap16().toString('utf16le');
+    return bytes.toString('utf8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') throw new ImportError(`${path}: no such file.`);
@@ -235,18 +248,23 @@ export function runImport(argv: string[], io: ImportIo): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--write') write = true;
-    else if (arg === '--cx') cx = argv[++i];
+    else if (arg === '--cx') cx = argv[i + 1]?.startsWith('-') ? '' : (argv[++i] ?? '');
     else if (arg.startsWith('--cx=')) cx = arg.slice('--cx='.length);
     else if (arg.startsWith('-')) {
       io.stderr(`cse-bridge import: unknown option ${arg}\n${IMPORT_USAGE}`);
       return 2;
     } else files.push(arg);
   }
-  if (files.length === 0 || files.length > 2 || cx === undefined || cx.trim() === '') {
-    io.stderr(IMPORT_USAGE);
+  let problem: string | undefined;
+  if (files.length === 0) problem = 'no annotations file given';
+  else if (files.length > 2) problem = `too many files: ${files.join(' ')}`;
+  else if (cx === undefined || cx.trim() === '') problem = '--cx NAME is required';
+  else if (/["\\\r\n]/.test(cx)) problem = `--cx ${JSON.stringify(cx)} cannot contain quotes, backslashes or newlines`;
+  if (problem !== undefined) {
+    io.stderr(`cse-bridge import: ${problem}\n${IMPORT_USAGE}`);
     return 2;
   }
-  cx = cx.trim();
+  cx = cx!.trim();
 
   const [annotationsPath, contextPath] = files as [string, string | undefined];
   let block: string;
@@ -282,7 +300,8 @@ export function runImport(argv: string[], io: ImportIo): number {
       return 1;
     }
   }
-  const next = existing === '' ? block : `${existing.replace(/\n*$/, '\n')}\n${block}`;
+  const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+  const next = existing === '' ? block : `${existing.replace(/(\r?\n)*$/, eol)}${eol}${block.replace(/\n/g, eol)}`;
   try {
     if (Object.hasOwn(parseYaml(existing), cx)) {
       io.stderr(`cse-bridge import: ${target} already defines ${cx}. Remove it or pick another --cx.\n`);

@@ -273,7 +273,7 @@ Now the untouched client keeps sending its original `cx` and gets site-restricte
 
 An unrecognised `cx` falls back to `default` rather than erroring, on the principle that a client you are migrating cannot change the `cx` it sends.
 
-Available profile keys: `engines`, `categories`, `sites`, `exclude`, `language`, `pagemap`, `description`. All optional. `site: x` from 1.2 still works as a one-entry `sites`.
+Available profile keys: `engines`, `categories`, `sites`, `exclude`, `language`, `pagemap`, `description`. All optional. `site: x` from 1.2 still works and means what Google's `site:` operator means: a path covers everything under it.
 
 ### Importing the site list
 

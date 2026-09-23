@@ -186,6 +186,15 @@ describe('siteSearchFilter and sort', () => {
     assert.match(expectApiError('q=a&cx=c&siteSearchFilter=include').detail, /siteSearchFilter/);
   });
 
+  test('a siteSearch the bridge cannot check results against is rejected, not answered empty', () => {
+    for (const bad of ['localhost:8080', 'example.com/a#b', 'user@example.com']) {
+      const err = expectApiError(`q=a&cx=c&siteSearch=${encodeURIComponent(bad)}`);
+      assert.equal(err.code, 400);
+      assert.match(err.detail, /'siteSearch'/);
+    }
+    assert.equal(parse('q=a&cx=c&siteSearch=https://example.com/blog/').siteSearch, 'https://example.com/blog/');
+  });
+
   test('sort rejects characters that would corrupt the backend query', () => {
     assert.equal(parse('q=a&cx=c&sort=date').sort, 'date');
     assert.equal(parse('q=a&cx=c&sort=date:d').sort, 'date:d');

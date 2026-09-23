@@ -229,13 +229,13 @@ webmd:
     - "www.webmd.com/hw/cancer/*"
 ```
 
-`sites` and `exclude` use Google's pattern syntax. A bare host (`example.com`) covers the host and all its subdomains, and so does `*.example.com`. `example.com/docs/*` is everything under `/docs`. A pattern with no star is that one page. Excludes win over includes. The 1.2 form `site: docs.rs` still works and means `sites: [docs.rs]`.
+`sites` and `exclude` use Google's pattern syntax. A bare host (`example.com`) covers the host and all its subdomains, and so does `*.example.com`. `example.com/docs/*` is everything under `/docs`. A pattern with no star is that one page. Excludes win over includes. The 1.2 key `site:` still works and keeps the meaning of Google's `site:` operator, so `site: docs.python.org/3` covers everything under `/3`, where `sites: [docs.python.org/3]` would be that one page.
 
-The list is enforced by checking every result the backend returns, before anything is paged or counted. That check is the part doing the work. SearXNG passes `site:` through to each engine, and not every engine honours it: with a three-site profile and 20 queries, SearXNG's bing engine returned 193 of 196 results from other sites. Through the check, none, but also very little at all: bing kept 3 results across those 20 queries. So point a site-restricted cx at engines that honour `site:` (`engines:` on the profile). In the same run `google cse` returned 70 of 70 on-list. Every response on a site-restricted cx carries `x-cse-bridge-off-list`, the number of distinct backend results the check has thrown away for that query, so a leaky engine shows up as a big number next to a short page.
+The list is enforced by checking every result the backend returns, before anything is paged or counted. That check is the part doing the work. SearXNG passes `site:` through to each engine, and not every engine honours it: with a three-site profile and 20 queries, SearXNG's bing engine returned 193 of 196 results from other sites. Through the check, none, but also very little at all: bing kept 3 results across those 20 queries. So point a site-restricted cx at engines that honour `site:` (`engines:` on the profile). In the same run `google cse` returned 70 of 70 on-list. Every response on a site-restricted cx carries `x-cse-bridge-off-list`, the number of distinct backend results the check has thrown away for that query, so a leaky engine shows up as a big number next to a short page. `x-cse-bridge-off-list-engines` counts the same drops per engine (`bing=9, qwant=1`) to tell you which one.
 
-Up to 8 patterns also go to the backend as `(site:a OR site:b ...)`, so the engines do most of the narrowing and the check catches the rest. A longer list is sent with no `site:` at all, only the check enforces it, and the response carries `x-cse-bridge-site-mode: filter-only` so you can tell. Expect fewer results per query in that mode, since the engines are searching the whole web and most of it gets dropped. The bridge fetches up to 12 backend pages per query looking for on-list results.
+Up to 8 patterns also go to the backend as `(site:a OR site:b ...)`, so the engines do most of the narrowing and the check catches the rest. A longer list is sent with no `site:` at all, only the check enforces it, and the response carries `x-cse-bridge-site-mode: filter-only` so you can tell. Expect fewer results per query in that mode, since the engines are searching the whole web and most of it gets dropped. The bridge fetches up to 12 backend pages per query looking for on-list results, so a leaky engine or a filter-only list costs more backend calls per request, not just fewer results.
 
-A client's `siteSearch` can narrow a cx but not widen it. `siteSearch=x` searches `x` within the cx's list, and `siteSearchFilter=e` removes `x` from it.
+A client's `siteSearch` can narrow a cx but not widen it. `siteSearch=x` searches `x` within the cx's list, and `siteSearchFilter=e` removes `x` from it. Like Google's, `siteSearch` is a `site:` value, so `example.com/blog` covers the whole blog. A `siteSearch` that can't overlap the list gets an empty result without a backend call.
 
 ### Endpoints
 
@@ -329,7 +329,7 @@ That is a real response from the compose stack (only `nextPage` is elided; the 0
 
 - **`width`/`height`** are parsed from the `resolution` SearXNG reports; **`byteSize`** from its human-readable `filesize` (1 KB = 1024); **`mime`/`fileFormat`** from `img_format` (`jpg` → `image/jpeg`). When an engine does not report one of these, the field is **omitted** — never guessed. The example above has no `mime` because that engine sent no format.
 - **A result whose image URL is missing is dropped entirely** rather than emitted with a page URL as `link` — an item that claims to be an image but links to an HTML page breaks hotlinking clients silently.
-- **`searchType=image` supersedes the profile's `categories`** rather than merging with them: a `cx` pinned to `categories: [news]` cannot also be an image engine, and the client asking for images is the stronger signal. Everything else about the profile (its `site:` restriction, language, engines) still applies.
+- **`searchType=image` supersedes the profile's `categories`** rather than merging with them: a `cx` pinned to `categories: [news]` cannot also be an image engine, and the client asking for images is the stronger signal. Everything else about the profile (its site list, language, engines) still applies.
 - **Image and web result sets for the same query are cached separately**, so alternating between them never leaks results across.
 
 ---
@@ -463,9 +463,9 @@ npm test
 ```
 
 ```
-# tests 268
+# tests 280
 # suites 51
-# pass 268
+# pass 280
 # fail 0
 ```
 

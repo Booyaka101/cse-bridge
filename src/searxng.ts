@@ -14,7 +14,7 @@
  */
 
 import { trim } from './cache.ts';
-import { matchUrl } from './profiles.ts';
+import { canOverlap, matchUrl } from './profiles.ts';
 import { backendUnavailable, rateLimited } from './errors.ts';
 
 /**
@@ -107,6 +107,8 @@ interface ResultSet {
   seen: Set<string>;
   /** Results the post-filter dropped, so a page of nothing but those still counts as new. */
   dropped: Set<string>;
+  /** Per engine, how many of `dropped` it returned. */
+  droppedBy: Map<string, number>;
   /** Highest backend page already merged in. */
   pagesFetched: number;
   /** The backend stopped producing anything new. */
@@ -249,6 +251,8 @@ export class SearxngClient {
     cached: boolean;
     /** Distinct backend results the site post-filter has dropped for this query so far. */
     dropped: number;
+    /** The same results by the engine that returned them, most first. */
+    droppedBy: [engine: string, count: number][];
   }> {
     const needed = start - 1 + num;
     const key = cacheKey(opts);
@@ -266,8 +270,10 @@ export class SearxngClient {
         set = undefined;
       }
       if (set === undefined) {
-        set = { results: [], seen: new Set(), dropped: new Set(), pagesFetched: 0, exhausted: false, expiresAt: now + this.cacheTtlMs };
+        set = { results: [], seen: new Set(), dropped: new Set(), droppedBy: new Map(), pagesFetched: 0, exhausted: false, expiresAt: now + this.cacheTtlMs };
       }
+
+      if (!canOverlap(opts.narrow ?? [], opts.sites ?? [])) set.exhausted = true;
 
       // Resume from wherever the cached set stopped; fetch only what is missing.
       while (!set.exhausted && set.results.length <= needed && set.pagesFetched < this.maxPages) {
@@ -283,6 +289,9 @@ export class SearxngClient {
           // shadow an on-list one that shares its img_src.
           if (!inScope(r.url, opts)) {
             if (!set.dropped.has(norm) && !set.seen.has(norm)) fresh++;
+            if (!set.dropped.has(norm)) {
+              for (const e of r.engines ?? (r.engine ? [r.engine] : [])) set.droppedBy.set(e, (set.droppedBy.get(e) ?? 0) + 1);
+            }
             set.dropped.add(norm);
             continue;
           }
@@ -331,6 +340,7 @@ export class SearxngClient {
       pagesFetched: pagesFetchedNow,
       cached: pagesFetchedNow === 0,
       dropped: set.dropped.size,
+      droppedBy: [...set.droppedBy].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
     };
   }
 
@@ -351,7 +361,7 @@ function inScope(url: string, opts: Omit<SearchOptions, 'pageno'>): boolean {
  * query string and differ only in what the post-filter keeps.
  */
 export function cacheKey(opts: Omit<SearchOptions, 'pageno'>): string {
-  const sorted = (list: string[] | undefined): string => [...(list ?? [])].sort().join(' ');
+  const sorted = (list: string[] | undefined): string[] => [...(list ?? [])].sort();
   return JSON.stringify([
     opts.query,
     opts.language ?? '',

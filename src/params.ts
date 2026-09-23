@@ -12,7 +12,7 @@
  */
 
 import { invalidArgument } from './errors.ts';
-import { parseSitePattern } from './profiles.ts';
+import { operatorPattern, parseSitePattern } from './profiles.ts';
 
 export const MAX_NUM = 10;
 export const MAX_START = 91;
@@ -174,6 +174,11 @@ export function parseParams(searchParams: URLSearchParams): CseParams {
       'siteSearchFilter',
     );
   }
+  // Results are checked against siteSearch, so one the bridge cannot read would silently match nothing.
+  const siteSearch = single(searchParams, 'siteSearch');
+  if (siteSearch !== undefined && parseSitePattern(operatorPattern(siteSearch)) === undefined) {
+    throw invalidArgument(`Invalid value for parameter 'siteSearch': ${siteSearch}. Expected a site or URL prefix.`, 'siteSearch');
+  }
 
   const sort = single(searchParams, 'sort');
   if (sort !== undefined && !/^[a-zA-Z0-9_.:,=\-]+$/.test(sort)) {
@@ -201,7 +206,7 @@ export function parseParams(searchParams: URLSearchParams): CseParams {
     hl: single(searchParams, 'hl'),
     lr: single(searchParams, 'lr'),
     safe,
-    siteSearch: single(searchParams, 'siteSearch'),
+    siteSearch,
     siteSearchFilter: rawFilter as 'i' | 'e' | undefined,
     dateRestrict,
     fileType: single(searchParams, 'fileType'),
@@ -264,6 +269,8 @@ function orGroup(sites: readonly string[]): string {
  * only narrow the cx, never widen it: an include becomes the one backend
  * `site:` term but results must still pass the profile, and an exclude is
  * added on top of the profile's includes rather than replacing them.
+ * `siteSearch` keeps the `site:` operator's meaning, so a path covers
+ * everything under it.
  */
 export function siteScope(
   params: Pick<CseParams, 'siteSearch' | 'siteSearchFilter'>,
@@ -275,16 +282,17 @@ export function siteScope(
   const narrow: string[] = [];
   const operators: string[] = [];
   const fits = sites.length <= MAX_SITE_OPERATORS;
+  const client = params.siteSearch === undefined ? undefined : operatorPattern(params.siteSearch);
 
-  if (params.siteSearch !== undefined && params.siteSearchFilter !== 'e') {
-    narrow.push(params.siteSearch);
-    operators.push(`site:${siteOperand(params.siteSearch)}`);
+  if (client !== undefined && params.siteSearchFilter !== 'e') {
+    narrow.push(client);
+    operators.push(`site:${siteOperand(client)}`);
     return { operators, sites, narrow, exclude, filterOnly: false };
   }
   if (sites.length > 0 && fits) operators.push(orGroup(sites));
-  if (params.siteSearch !== undefined) {
-    exclude.push(params.siteSearch);
-    operators.push(`-site:${siteOperand(params.siteSearch)}`);
+  if (client !== undefined) {
+    exclude.push(client);
+    operators.push(`-site:${siteOperand(client)}`);
   }
   return { operators, sites, narrow, exclude, filterOnly: !fits };
 }

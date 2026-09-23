@@ -188,6 +188,20 @@ describe('importAnnotations', () => {
       () => importAnnotations(`<Annotations>${annotation('a.test', 'mystery')}${annotation('b.test', '_exclude_')}</Annotations>`),
       /would search the whole web/,
     );
+    // The context says the engine is restricted, yet no annotation carries the include label.
+    const restricted =
+      '<CustomSearchEngine><BackgroundLabels><Label name="_include_" mode="FILTER"/><Label name="_exclude_" mode="ELIMINATE"/></BackgroundLabels></CustomSearchEngine>';
+    assert.throws(
+      () => importAnnotations(`<Annotations>${annotation('bad.test/*', '_exclude_')}</Annotations>`, restricted),
+      /restricts this engine to an include label, but no annotation carries one/,
+    );
+  });
+
+  test('excludes alone, with nothing saying the engine is restricted, import with a warning', () => {
+    const result = importAnnotations(`<Annotations>${annotation('bad.test/*', '_cse_exclude_x')}</Annotations>`);
+    assert.deepEqual(result.sites, []);
+    assert.deepEqual(result.exclude, ['bad.test/*']);
+    assert.deepEqual(result.warnings, ['only excludes were found, so this profile searches the whole web except them']);
   });
 });
 
@@ -205,6 +219,11 @@ describe('cse-bridge import', () => {
     assert.equal(run(['--cx', 'x']).code, 2, 'no file');
     assert.equal(run(['a', 'b', 'c', '--cx', 'x']).code, 2, 'too many files');
     assert.equal(run(['annotations.xml', '--cx', 'x', '--frob']).code, 2);
+    const swallowed = run(['annotations.xml', '--cx', '--write']);
+    assert.equal(swallowed.code, 2, '--write is not taken as the cx name');
+    assert.match(swallowed.stderr, /--cx NAME is required/);
+    assert.equal(swallowed.stdout, '');
+    assert.equal(run(['annotations.xml', '--cx', 'a"b']).code, 2);
     const missing = run(['nope.xml', '--cx=x']);
     assert.equal(missing.code, 1);
     assert.equal(missing.stderr, 'cse-bridge import: nope.xml: no such file.\n');
@@ -249,6 +268,23 @@ describe('cse-bridge import', () => {
       const out = run([join(fixtures, 'annotations.xml'), join(fixtures, 'context.xml'), '--cx', 'webmd', '--write'], {}, dir);
       assert.equal(out.code, 0, out.stderr);
       assert.equal(readFileSync(join(dir, 'profiles.yml'), 'utf8'), EXPECTED_YAML);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('reads an export re-saved as UTF-16, and appends to a CRLF file in CRLF', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cse-bridge-import-'));
+    try {
+      const utf16 = join(dir, 'annotations.xml');
+      writeFileSync(utf16, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(annotationsXml, 'utf16le')]));
+      const target = join(dir, 'profiles.yml');
+      writeFileSync(target, 'default:\r\n  categories: [general]\r\n');
+      const out = run([utf16, join(fixtures, 'context.xml'), '--cx', 'webmd', '--write'], { PROFILES_FILE: target }, dir);
+      assert.equal(out.code, 0, out.stderr);
+      const written = readFileSync(target, 'utf8');
+      assert.doesNotMatch(written, /(?<!\r)\n/, 'no bare LF');
+      assert.deepEqual(profilesFromYaml(written, target).get('webmd').exclude, ['www.webmd.com/hw/cancer/*']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { matchUrl, parseSitePattern, parseYaml, profilesFromYaml, ProfilesError } from '../src/profiles.ts';
 import { buildQueryString, siteScope, MAX_SITE_OPERATORS, type CseParams } from '../src/params.ts';
 import { SearxngClient, cacheKey, type SearxngResult } from '../src/searxng.ts';
-import { createBridge, OFF_LIST_HEADER, SITE_MODE_HEADER } from '../src/server.ts';
+import { createBridge, OFF_LIST_ENGINES_HEADER, OFF_LIST_HEADER, SITE_MODE_HEADER } from '../src/server.ts';
 import { loadConfig } from '../src/config.ts';
 import { cseParams } from './helpers.ts';
 
@@ -61,6 +61,14 @@ describe('matchUrl', () => {
     ['https://fine.test/', [], ['spam.test'], true],
     // Unparseable result URLs never pass a restricted list.
     ['not a url', ['example.com'], [], false],
+    // A fully qualified host is the same host.
+    ['https://example.com./x', ['example.com'], [], true],
+    ['https://example.com/x', ['example.com.'], [], true],
+    // Percent-escapes compare case-insensitively.
+    ['https://example.com/caf%c3%a9/menu', ['example.com/café/*'], [], true],
+    // A query with no path is that query on the home page, not the whole host.
+    ['https://example.com/?id=5', ['example.com?id=5'], [], true],
+    ['https://sub.example.com/anything', ['example.com?id=5'], [], false],
   ];
 
   for (const [url, sites, exclude, expected] of cases) {
@@ -80,6 +88,7 @@ describe('parseSitePattern', () => {
     assert.equal(parseSitePattern('https://WWW.WebMD.com/hw/*')?.text, 'www.webmd.com/hw/*');
     assert.equal(parseSitePattern('bücher.example')?.text, 'xn--bcher-kva.example');
     assert.equal(parseSitePattern('*.example.com/*')?.text, '*.example.com/*');
+    assert.equal(parseSitePattern('//example.com/docs/*')?.text, 'example.com/docs/*');
   });
 
   test('the backend operand is the literal prefix, without stars', () => {
@@ -89,7 +98,8 @@ describe('parseSitePattern', () => {
   });
 
   test('rejects what is not a host pattern', () => {
-    for (const bad of ['', 'has space.com', 'user@example.com', 'ex*ample.com', '"quoted".com', 'https://']) {
+    const badPatterns = ['', 'has space.com', 'user@example.com', 'ex*ample.com', '"quoted".com', 'https://', 'example.com:8080/*', 'example.com\\admin', 'example.com/#!/docs/*'];
+    for (const bad of badPatterns) {
       assert.equal(parseSitePattern(bad), undefined, bad);
     }
   });
@@ -130,6 +140,26 @@ both:
   test('a pattern the bridge cannot enforce is a startup error, not a silent wide-open cx', () => {
     assert.throws(() => profilesFromYaml('bad:\n  sites: [has space.com]\n', 't.yml'), ProfilesError);
     assert.throws(() => profilesFromYaml('bad:\n  exclude: [user@example.com]\n', 't.yml'), ProfilesError);
+    assert.throws(() => profilesFromYaml('bad:\n  site: docs.*.example.com\n', 't.yml'), /bad\.site has an entry/);
+  });
+
+  test('site: keeps the site: operator meaning from 1.2, where a path covers everything under it', () => {
+    const set = profilesFromYaml(
+      'py:\n  site: docs.python.org/3\npasted:\n  site: https://example.com/\npse:\n  sites: [docs.python.org/3]\n',
+      't.yml',
+    );
+    assert.deepEqual(set.get('py').sites, ['docs.python.org/3/*']);
+    assert.equal(matchUrl('https://docs.python.org/3/library/os.html', set.get('py').sites, []), true);
+    assert.equal(buildQueryString(params(), set.get('py').sites), 'widgets site:docs.python.org/3');
+    assert.deepEqual(set.get('pasted').sites, ['example.com']);
+    assert.equal(matchUrl('https://example.com/about', set.get('pasted').sites, []), true);
+    // sites: is the PSE list, where no star means one page.
+    assert.equal(matchUrl('https://docs.python.org/3/library/os.html', set.get('pse').sites, []), false);
+  });
+
+  test('a profiles file saved with a UTF-8 BOM loads', () => {
+    const set = profilesFromYaml('\uFEFFwebmd:\n  sites: [www.webmd.com]\n', 't.yml');
+    assert.deepEqual(set.get('webmd').sites, ['www.webmd.com']);
   });
 
   test('an old-style cx with colons works as a key', () => {
@@ -196,6 +226,16 @@ describe('siteSearch combined with a profile', () => {
     );
   });
 
+  test('siteSearch is a site: operator value, so a path covers what is under it', () => {
+    const narrowed = siteScope(params({ siteSearch: 'example.com/blog/' }), ['example.com']);
+    assert.deepEqual(narrowed.narrow, ['example.com/blog/*']);
+    assert.deepEqual(narrowed.operators, ['site:example.com/blog']);
+    assert.equal(matchUrl('https://example.com/blog/post-1', narrowed.narrow, []), true);
+    const excluded = siteScope(params({ siteSearch: 'example.com/blog', siteSearchFilter: 'e' }), ['example.com']);
+    assert.equal(matchUrl('https://example.com/blog/post-1', excluded.sites, excluded.exclude), false);
+    assert.equal(matchUrl('https://example.com/about', excluded.sites, excluded.exclude), true);
+  });
+
   test('siteSearch still narrows a filter-only profile', () => {
     const many = Array.from({ length: 12 }, (_, i) => `s${i}.test`);
     const scope = siteScope(params({ siteSearch: 's3.test' }), many);
@@ -229,6 +269,7 @@ function leakyBackend(pages: string[][], calls: URL[] = []): typeof fetch {
       title: `Result ${pageno}.${i}`,
       content: 'snippet',
       engine: 'leaky',
+      engines: ['leaky'],
     }));
     return new Response(JSON.stringify({ query: url.searchParams.get('q'), results }), { status: 200 });
   };
@@ -298,6 +339,20 @@ describe('fetchWindow post-filter', () => {
     );
     assert.deepEqual(outside.window, []);
   });
+
+  test('a narrow that cannot overlap the list skips the backend', async () => {
+    const calls: URL[] = [];
+    const c = new SearxngClient({
+      baseUrl: 'http://searxng.test',
+      timeoutMs: 5000,
+      fetchImpl: leakyBackend([['https://other.test/1'], ['https://other.test/2']], calls),
+    });
+    const res = await c.fetchWindow({ query: 'q', safesearch: 0, sites: ['example.com'], narrow: ['other.test'] }, 1, 10);
+    assert.deepEqual(res.window, []);
+    assert.equal(calls.length, 0);
+    await c.fetchWindow({ query: 'q', safesearch: 0, sites: ['*.example.com'], narrow: ['docs.example.com/api/*'] }, 1, 10);
+    assert.ok(calls.length > 0, 'a subdomain narrow can overlap, so it still searches');
+  });
 });
 
 describe('site lists over HTTP', () => {
@@ -346,9 +401,11 @@ describe('site lists over HTTP', () => {
       assert.equal(body.searchInformation.totalResults, '3');
       assert.equal(calls[0]!.searchParams.get('q'), 'diet site:www.webmd.com/hw');
       assert.equal(res.headers.get(OFF_LIST_HEADER), '4', 'healthline, /diet/news and both hw/cancer pages');
+      assert.equal(res.headers.get(OFF_LIST_ENGINES_HEADER), 'leaky=4');
 
       const unrestricted = await fetch(`${base}/customsearch/v1?cx=other&q=diet`);
       assert.equal(unrestricted.headers.get(OFF_LIST_HEADER), null);
+      assert.equal(unrestricted.headers.get(OFF_LIST_ENGINES_HEADER), null);
     } finally {
       await bridge.close();
     }
