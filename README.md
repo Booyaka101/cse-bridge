@@ -85,6 +85,30 @@ That is a real, unedited response from the stack above. Real results, from real 
 
 ---
 
+## Find your call sites
+
+Before changing anything, list what there is to change. In your project's root:
+
+```bash
+npx cse-bridge@latest scan .
+```
+
+```
+needs-change  python-client  app.py:12
+    client_options=ClientOptions(api_endpoint="http://localhost:8080")
+repointed     python-client  app.py:17
+needs-change  raw-url        web/search.js:2
+    swap the host: http://localhost:8080/customsearch/v1
+
+3 call sites: 2 need a change, 1 already repointed, 0 out of scope
+```
+
+It knows the Node, Python, LangChain, Go, Java, Ruby and PHP clients and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site with that change within 5 lines counts as repointed. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while anything still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope, since the bridge serves only the JSON API. Calls to `cse.siterestrict.list` need a change of their own, since the bridge has no such endpoint: call `cse.list` and restrict sites in the cx profile.
+
+It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. Treat a clean scan as a good sign rather than proof. `node_modules`, `vendor`, `dist`, `build`, `target`, virtualenvs, binaries and files over 2 MB are skipped, and in Markdown only fenced code blocks count.
+
+---
+
 ## Does my client actually work unchanged?
 
 These four are verified end to end against a live stack. Full recipes in [docs/migrating-from-google-cse.md](docs/migrating-from-google-cse.md).
@@ -134,7 +158,7 @@ SEARXNG_URL=http://localhost:8888 cse-bridge
 ```
 
 ```
-cse-bridge 1.3.0
+cse-bridge 1.4.0
   listening   http://localhost:8080
   endpoint    http://localhost:8080/customsearch/v1
   backend     http://localhost:8888
@@ -463,9 +487,9 @@ npm test
 ```
 
 ```
-# tests 280
-# suites 51
-# pass 280
+# tests 343
+# suites 57
+# pass 343
 # fail 0
 ```
 

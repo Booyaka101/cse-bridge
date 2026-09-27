@@ -99,7 +99,8 @@ function parseNonNegativeInt(raw: string | undefined, name: string, fallback: nu
   return n;
 }
 
-function parseUrl(raw: string | undefined, name: string, fallback: string): string {
+/** An absolute http(s) URL as origin plus path, with no trailing slash. Throws ConfigError. */
+export function parseUrl(raw: string | undefined, name: string, fallback: string): string {
   const value = raw === undefined || raw === '' ? fallback : raw;
   let parsed: URL;
   try {

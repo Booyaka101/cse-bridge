@@ -23,6 +23,10 @@ USAGE
                                   turn a Programmable Search Engine's
                                   downloaded site list into a profile. Prints
                                   YAML, or appends it to PROFILES_FILE
+  cse-bridge scan [path...] [--json] [--bridge-url URL]
+                                  list the places your code calls Google's
+                                  Custom Search JSON API and the change each
+                                  one needs. Exits 1 if any still does
   cse-bridge --help               show this message
   cse-bridge --version            print the version
 
@@ -77,12 +81,15 @@ async function loadDist(name) {
   }
 }
 
+// Subcommand name -> the function its dist module exports.
+const SUBCOMMANDS = { import: 'runImport', scan: 'runScan' };
+
 async function main() {
   const argv = process.argv.slice(2);
-  if (argv[0] === 'import' && !argv.includes('--help') && !argv.includes('-h')) {
-    const mod = await loadDist('import');
+  if (Object.hasOwn(SUBCOMMANDS, argv[0]) && !argv.includes('--help') && !argv.includes('-h')) {
+    const mod = await loadDist(argv[0]);
     if (!mod) return;
-    process.exitCode = mod.runImport(argv.slice(1), {
+    process.exitCode = mod[SUBCOMMANDS[argv[0]]](argv.slice(1), {
       stdout: (text) => process.stdout.write(text),
       stderr: (text) => process.stderr.write(text),
       env: process.env,

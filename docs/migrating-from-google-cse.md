@@ -4,6 +4,8 @@ Google's Custom Search JSON API is [closed to new customers, and existing custom
 
 This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**.
 
+To see which of these recipes your code needs, and where, run `npx cse-bridge@latest scan .` in your project. It lists every call site it recognises, marks the ones already repointed, and prints the change from this page under each one that isn't. It exits 1 while anything is left, so it also works as a CI check once you're done.
+
 Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS` is unset, so any `key` value is accepted. Substitute your own host and key as needed.
 
 ---

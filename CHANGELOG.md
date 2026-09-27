@@ -2,6 +2,22 @@
 
 All notable changes to cse-bridge. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [1.4.0] - 2026-09-27
+
+### Added
+
+- **`cse-bridge scan [path...] [--json] [--bridge-url URL]`** lists the places a codebase calls Google's Custom Search JSON API. It recognises the Node (`@googleapis/customsearch` and `googleapis`), Python (`google-api-python-client`), LangChain `GoogleSearchAPIWrapper`, Go, Java, Ruby and PHP clients, plus raw `googleapis.com/customsearch/v1` URLs. Each call site is `needs-change`, printed with the one-line fix from the migration guide, or `repointed` if that guide's override appears within 5 lines. A page embedding Google's search widget is `out-of-scope`, since the bridge serves only the JSON API. Exits 1 while anything needs a change and 2 for bad arguments or a missing path, so it can gate CI. `--json` gives `{version, root, findings, summary}` with forward-slash paths.
+- Calls to `cse.siterestrict.list` are flagged too (`/customsearch/v1/siterestrict` in a URL, `.siterestrict()` or `.Siterestrict.List` in a client, LangChain's `siterestrict=True`). The bridge serves only `/customsearch/v1`, so the fix is to call `cse.list` and put the site restriction in the cx profile.
+- The fixes follow `--bridge-url` (default `http://localhost:8080`) with the trailing slash each client wants: `rootUrl`, `WithEndpoint`, `setRootUrl` and `root_url` get one, `api_endpoint` and PHP's `base_path` get none, whatever the URL was typed with.
+
+### Notes
+
+- Client rules only run on their own language's files, so PHP's `CustomSearchAPI` class does not match the Java client of the same name. In Markdown only fenced code blocks are scanned, each on its own and by its fence tag, so a "before" snippet does not count as repointed because the "after" snippet sits under it. For the same reason, the search for an override stops at the next call site of the same rule.
+- Whole-line comments are neither call sites nor overrides. An import on its own (`require 'google/apis/customsearch_v1'`, a Go or Java type import) is reported only when nothing in the scan constructs that client, since most files importing a client only use its types.
+- The OpenSearch template every response carries in `url.template` (`https://www.googleapis.com/customsearch/v1?q={searchTerms}...`), the bridge's own included, is not a call site, so recorded responses and test fixtures stay quiet.
+- `node_modules`, `.git`, `vendor`, `dist`, `build`, `.venv`, `venv`, `__pycache__` and `target` are skipped at any depth, along with files over 2 MB and files with a NUL byte in their first 8 KB. Symlinks are followed, and each real directory is visited once, so a link loop terminates.
+- Tried on 22 public repositories that use the API or the widget: 26 client call sites (2 of them `siterestrict`) and 345 widget embeds reported, each one real, and a manual grep of the same trees found no call site it missed. The first version of these rules reported 10 more, all false: type-only imports, a commented-out constructor and two vendored classes named `GoogleSearchAPIWrapper`, which is what the comment, import and class-statement handling above fixes.
+
 ## [1.3.0] - 2026-09-23
 
 ### Added
