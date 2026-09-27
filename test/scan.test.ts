@@ -225,6 +225,53 @@ describe('proximity', () => {
       'cse = build("customsearch", "v1", developerKey=KEY)',
     ].join('\n');
     assert.deepEqual(pick(scanText('a.py', vertex, BRIDGE)), ['needs-change python-client 3']);
+    const options = ['google.options({', '  auth,', `  rootUrl: '${BRIDGE}/',`, '});', "const c = google.customsearch('v1');"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', options, BRIDGE)), ['needs-change node-client 5']);
+    const scope = `svc, _ := customsearch.NewService(ctx, option.WithEndpoint(bridge), option.WithScopes("https://www.googleapis.com/auth/cse"))`;
+    assert.deepEqual(pick(scanText('a.go', scope, BRIDGE)), ['repointed go 1']);
+  });
+
+  test("another Google client's options are not an override", () => {
+    const split = ['vertex = discoveryengine.SearchServiceClient(', '    client_options=vertex_opts,', ')', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', split, BRIDGE)), ['needs-change python-client 4']);
+    const passed = ['opts = ClientOptions(api_endpoint=VERTEX_ENDPOINT)', 'vertex = discoveryengine.SearchServiceClient(client_options=opts)', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', passed, BRIDGE)), ['needs-change python-client 3']);
+    const inline = ['de = discoveryengine.SearchServiceClient(client_options=ClientOptions(api_endpoint=DE_ENDPOINT))', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', inline, BRIDGE)), ['needs-change python-client 2']);
+    const wrapped = 'cse = build("customsearch", "v1", http=AuthorizedHttpClient(creds), client_options=opts)';
+    assert.deepEqual(pick(scanText('a.py', wrapped, BRIDGE)), ['repointed python-client 1']);
+  });
+
+  test('a keyword argument or initializer property is not a variable, so it stays with its own call', () => {
+    const py = ['search = build(', '    "customsearch", "v1",', '    client_options=opts,', ')', 'images = build("customsearch", "v1", client_options=opts)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['repointed python-client 2', 'repointed python-client 5']);
+    const cs = [
+      'var web = new CustomSearchAPIService(new BaseClientService.Initializer',
+      '{',
+      '    ApiKey = key,',
+      `    BaseUri = "${BRIDGE}/",`,
+      '});',
+      `var images = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key, BaseUri = "${BRIDGE}/" });`,
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['repointed dotnet 1', 'repointed dotnet 6']);
+  });
+
+  test('a variable used on the continuation line of a call belongs to that call', () => {
+    const py = ['legacy = build("customsearch", "v1", developerKey=KEY)', 'opts = ClientOptions(api_endpoint=BRIDGE)', 'bridged = build("customsearch", "v1",', '    developerKey=KEY, client_options=opts)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1', 'repointed python-client 3']);
+    const go = ['legacy, _ := customsearch.NewService(ctx)', 'ep := option.WithEndpoint(bridge)', 'bridged, _ := customsearch.NewService(ctx,', '\toption.WithAPIKey(key), ep)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 3']);
+  });
+
+  test('an options object that is typed or spans lines belongs to the call that uses it', () => {
+    const typed = ["const legacy = customsearch({ version: 'v1' });", 'const opts: customsearch_v1.Options = { version: \'v1\', rootUrl: BRIDGE };', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', typed, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
+    const split = ["const legacy = customsearch({ version: 'v1' });", 'const opts = {', "  version: 'v1',", '  rootUrl: BRIDGE,', '};', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', split, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 6']);
+  });
+
+  test("PHP's root URL argument has to be something other than null", () => {
+    assert.deepEqual(pick(scanText('a.php', '$svc = new Google\\Service\\CustomSearchAPI($client, null);', BRIDGE)), ['needs-change php 1']);
   });
 
   test('an import line between the override and the call does not hide the override', () => {
@@ -280,6 +327,9 @@ describe('proximity', () => {
     assert.deepEqual(pick(scanText('a.rb', 'url = <<~U\n  #{base}https://www.googleapis.com/customsearch/v1?key=#{k}\nU', BRIDGE)), ['needs-change raw-url 2']);
     assert.deepEqual(scanText('a.sh', '# curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
     assert.deepEqual(scanText('a.py', '#service = build("customsearch", "v1")', BRIDGE), []);
+    assert.deepEqual(scanText('.env.example', '#CSE_URL=https://www.googleapis.com/customsearch/v1', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '#curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
+    assert.deepEqual(scanText('a.md', '```\n#service = build("customsearch", "v1")\n```', BRIDGE), []);
   });
 
   test('clients built in less usual ways are found', () => {
@@ -419,6 +469,11 @@ describe('what gets scanned', () => {
   test('a notebook cell is scanned through its JSON escaping', () => {
     const cell = '    "service = build(\\"customsearch\\", \\"v1\\", developerKey=KEY)\\n",';
     assert.deepEqual(pick(scanText('explore.ipynb', cell, BRIDGE)), ['needs-change python-client 1']);
+    const notebook = (source: string | string[]) => ({ cells: [{ cell_type: 'code', source }] });
+    const minified = JSON.stringify(notebook(['service = build("customsearch", "v1", developerKey=KEY)\n']));
+    assert.deepEqual(pick(scanText('explore.ipynb', minified, BRIDGE)), ['needs-change python-client 1']);
+    const oneString = JSON.stringify(notebook('import os\nservice = build("customsearch", "v1", developerKey=KEY)\n'), null, 1);
+    assert.deepEqual(pick(scanText('explore.ipynb', oneString, BRIDGE)).map((f) => f.replace(/ \d+$/, '')), ['needs-change python-client']);
   });
 
   test('a raw URL on a line that also names the bridge is skipped, but not for a URL the bridge URL merely starts', () => {
@@ -454,6 +509,8 @@ describe('walking the tree', () => {
     const dir = tree(t, { 'app.sh': hit, 'env/pyvenv.cfg': 'home = /usr/bin\n', 'env/lib/search.sh': hit });
     assert.deepEqual(JSON.parse(run(['--json'], dir).stdout).findings.map((f: Finding) => f.file), ['app.sh']);
     assert.match(run(['env'], dir).stdout, /lib\/search\.sh:1/);
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir }).status, 0);
+    assert.deepEqual(JSON.parse(run(['--json'], dir).stdout).findings.map((f: Finding) => f.file), ['app.sh'], 'untracked in a git repo too');
   });
 
   test('a directory named on the command line is scanned even if it has a skipped name', (t) => {

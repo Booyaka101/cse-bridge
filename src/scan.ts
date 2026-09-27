@@ -32,9 +32,12 @@ export interface Rule {
   imports?: RegExp;
   /**
    * Seen within WINDOW lines of a call site, the client has already been pointed elsewhere.
-   * Not in a trailing comment, and not on a line naming a googleapis.com host.
+   * Not in a trailing comment, and not on a line naming a googleapis.com host other than in
+   * an OAuth scope.
    */
   override: RegExp | null;
+  /** The code up to a bracket that, enclosing an override, makes it some other client's. */
+  notIn?: RegExp;
   outOfScope?: true;
   fix: (bridgeUrl: string) => string;
 }
@@ -90,17 +93,20 @@ export const RULES: readonly Rule[] = [
     // the factory returns, and some code builds it directly.
     match: /(?<!\bfunction\s+)\bcustomsearch\)?\(|\bcustomsearch_v1\.Customsearch\s*\(/,
     imports: /@googleapis\/customsearch/,
+    override: /\brootUrl\b/,
     // The services ignore a rootUrl given to google.options().
-    override: /^(?!.*\bgoogle\.options\s*\().*\brootUrl\b/,
+    notIn: /\bgoogle\.options\s*\($/,
     fix: (b) => `rootUrl: '${b}/'`,
   },
   {
     id: 'python-client',
     lang: 'python',
-    // The second branch is the first argument of a build( call split across lines.
-    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?["']customsearch["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
-    // Not the client_options of another Google client, such as Vertex AI Search's.
-    override: /\bapi_endpoint\b|(?<!Client\s*\(.*)\bclient_options\s*=/,
+    // The second branch is the first argument of a build( call split across lines. The
+    // backslashes are for a notebook saved as one line of JSON.
+    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?\\?["']customsearch\\?["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
+    override: /\bapi_endpoint\b|\bclient_options\s*=/,
+    // Another Google client's options, such as Vertex AI Search's.
+    notIn: /Client\s*\($/,
     fix: (b) => `client_options=ClientOptions(api_endpoint="${b}")`,
   },
   {
@@ -155,7 +161,7 @@ export const RULES: readonly Rule[] = [
     imports: /\bCustomSearchAPI\b|\bGoogle_Service_Customsearch\b/,
     // The service's second argument. The client's base_path setting does not reach it, and
     // the legacy Google_Service_Customsearch class has no such argument.
-    override: /\bnew\s+[\w\\]*CustomSearchAPI\s*\([^,()]+,\s*\S|\brootUrl\s*:/,
+    override: /\bnew\s+[\w\\]*CustomSearchAPI\s*\([^,;]+,\s*(?!null\b)\S|\brootUrl\s*:/,
     fix: (b) => `new Google\\Service\\CustomSearchAPI($client, '${b}/')`,
   },
   {
@@ -200,22 +206,41 @@ const MARKDOWN = new Set(['.md', '.mdx', '.markdown']);
  */
 function codeOf(line: string, lang: string | undefined): string {
   const code = line.replace(/^\s*(?:\/\*.*?\*\/\s*)+/, '');
-  const hash = lang !== undefined && lang in HASH_COMMENT ? HASH_COMMENT[lang] : /^\s*#(?=\s|#|$)/;
+  const hash = lang !== undefined && lang in HASH_COMMENT ? HASH_COMMENT[lang] : HASH_COMMENT['*'];
   return /^\s*(?:\/\/|\/\*|\*(?=\s|$)|<!--)/.test(code) || hash?.test(code) ? '' : code;
 }
 
 /**
- * A line-leading `#` that starts a comment. It is a private field in JavaScript, a `#[`
- * attribute in PHP and `#{` interpolation in a Ruby heredoc. In a file of no known language
- * it takes a space after it, so C's `#define` is code.
+ * A line-leading `#` that starts a comment, by language. It is a private field in JavaScript,
+ * a `#[` attribute in PHP and `#{` interpolation in a Ruby heredoc, and elsewhere a C
+ * preprocessor directive is code.
  */
-const HASH_COMMENT: Record<string, RegExp | null> = { node: null, php: /^\s*#(?![!\[])/, ruby: /^\s*#(?![!{])/, python: /^\s*#(?!!)/ };
+const HASH_COMMENT: Record<string, RegExp | null> = {
+  node: null,
+  php: /^\s*#(?![!\[])/,
+  ruby: /^\s*#(?![!{])/,
+  python: /^\s*#(?!!)/,
+  '*': /^\s*#(?!!|\s*(?:define|undef|include|if|ifdef|ifndef|elif|else|endif|pragma|error)\b)/,
+};
 
-const TRAILING_COMMENT: Record<string, RegExp> = { python: /\s#.*$/, ruby: /\s#.*$/, php: /\s(?:\/\/|#).*$/, '*': /\s(?:\/\/|#).*$/ };
+/** A comment after code on a line, by language. */
+const TRAILING_COMMENT: Record<string, RegExp> = {
+  python: /\s#/,
+  ruby: /\s#/,
+  php: /\s(?:\/\/|#)/,
+  '*': /\s(?:\/\/|#)/,
+  '': /\s\/\//,
+};
+
+/** The line with the inside of each string literal blanked, so brackets and comment markers in strings don't count. */
+function blankStrings(line: string): string {
+  return line.replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, (s) => s[0] + ' '.repeat(s.length - 2) + s[0]);
+}
 
 /** The line without a trailing comment, where a TODO can name an override that isn't there yet. */
 function beforeComment(line: string, lang: string | undefined): string {
-  return line.replace(TRAILING_COMMENT[lang ?? ''] ?? /\s\/\/.*$/, '');
+  const at = blankStrings(line).search(TRAILING_COMMENT[lang ?? ''] ?? TRAILING_COMMENT['']!);
+  return at < 0 ? line : line.slice(0, at);
 }
 
 /**
@@ -272,23 +297,95 @@ function applies(rule: Rule, lang: string | undefined): boolean {
   return !SCOPED.has(rule.lang) || lang === '*' || lang === rule.lang;
 }
 
+/** A googleapis.com host, other than in an OAuth scope. */
+const GOOGLE_HOST = /googleapis\.com(?!\/auth\/)/;
+
+/** `name =` or `name :=` starting a statement, after any declaration keyword or type. */
+const ASSIGNMENT = /^\s*(?:export\s+)?(?:(?:const|let|var|val|final)\s+)?(?:[\w.<>[\]]+\s+)?(\$?\w+)(?:\s*:\s*[\w.<>[\], ]+?)?\s*:?=(?!=)/;
+
+interface Bracket {
+  line: number;
+  col: number;
+}
+
+/** The brackets still open at column `col` of line `j`, innermost first, looking back WINDOW lines. */
+function enclosers(flat: string[], j: number, col: number): Bracket[] {
+  const open: Bracket[] = [];
+  let depth = 0;
+  for (let i = j; i >= 0 && j - i <= WINDOW; i--) {
+    const text = flat[i]!;
+    for (let c = (i === j ? col : text.length) - 1; c >= 0; c--) {
+      if (')]}'.includes(text[c]!)) depth++;
+      else if (!'([{'.includes(text[c]!)) continue;
+      else if (depth > 0) depth--;
+      else open.push({ line: i, col: c });
+    }
+  }
+  return open;
+}
+
+/** The line a bracket's statement starts on, and its text up to the bracket. An Allman brace's is the line above. */
+function headOf(flat: string[], b: Bracket): { line: number; text: string } {
+  const text = flat[b.line]!.slice(0, b.col);
+  return text.trim() === '' && b.line > 0 ? { line: b.line - 1, text: flat[b.line - 1]! } : { line: b.line, text };
+}
+
+/** A brace opening a block of statements rather than an object literal or a C# initializer. */
+function isBlock(flat: string[], b: Bracket, head: string): boolean {
+  return flat[b.line]![b.col] === '{' && /(?:\)|=>|\w)\s*$/.test(head) && !/\bnew\s+[\w.<>]+\s*(?:\(\s*\))?\s*$/.test(head);
+}
+
+/** The line where the brackets of the call on line `s` close. */
+function callEnd(flat: string[], s: number): number {
+  let depth = 0;
+  for (let i = s; i < flat.length && i - s <= WINDOW; i++) {
+    for (const ch of flat[i]!) {
+      if ('([{'.includes(ch)) depth++;
+      else if (')]}'.includes(ch)) depth--;
+    }
+    if (depth <= 0) return i;
+  }
+  return s + WINDOW;
+}
+
 /**
- * The sites that an override has repointed. Each override line belongs to one site
- * within WINDOW lines: its own line, else the one below that uses the variable it assigns,
- * else the nearest above it, as in a multi-line call or an assignment after construction, else the
- * nearest below. So a "before" line does not borrow the override of the "after" line
- * next to it, nor the next call its predecessor's.
+ * The sites that an override has repointed. An override belongs to at most one site: the call
+ * it is written in, else the call that uses the variable it is assigned to, else the nearest
+ * site above it within WINDOW lines, as in a chained builder or an assignment after
+ * construction, else the nearest below. So a "before" line does not borrow the override of
+ * the "after" line next to it.
  */
 function repointed(rule: Rule, lang: string | undefined, lines: string[], sites: number[]): Set<number> {
   const owners = new Set<number>();
   if (rule.override === null) return owners;
+  let blanked: string[] | undefined;
   lines.forEach((line, j) => {
+    if (!rule.override!.test(line)) return;
+    const flat = (blanked ??= lines.map((text) => blankStrings(beforeComment(text, lang))));
     const code = beforeComment(line, lang);
-    if (!rule.override!.test(code) || /googleapis\.com/.test(code)) return;
-    const below = sites.filter((s) => s > j && s - j <= WINDOW);
-    const assigned = /^\s*(?:(?:const|let|var|val|final)\s+)?(\$?\w+)\s*:?=(?!=)/.exec(code)?.[1];
-    const user = assigned === undefined ? undefined : below.find((s) => new RegExp(`(?<![\\w$])${assigned.replace('$', '\\$')}\\b`).test(lines[s]!));
-    const owner = sites.includes(j) ? j : (user ?? sites.findLast((s) => s < j && j - s <= WINDOW) ?? below[0]);
+    const m = rule.override!.exec(code);
+    if (m === null || GOOGLE_HOST.test(code)) return;
+    // The brackets of the statement the override is in.
+    const heads: { line: number; text: string }[] = [];
+    for (const b of enclosers(flat, j, m.index)) {
+      const head = headOf(flat, b);
+      if (isBlock(flat, b, head.text)) break;
+      if (rule.notIn?.test(flat[b.line]!.slice(0, b.col + 1))) return;
+      heads.push(head);
+    }
+    let owner = sites.includes(j) ? j : undefined;
+    for (const head of heads) owner ??= sites.findLast((s) => s >= head.line && s < j);
+    const name = owner === undefined ? ASSIGNMENT.exec(heads.at(-1)?.text ?? flat[j]!)?.[1] : undefined;
+    if (name !== undefined) {
+      const use = new RegExp(`(?<![\\w$.])${name.replace('$', '\\$')}\\b`);
+      const k = flat.findIndex((text, i) => i > j && i - j <= WINDOW && use.test(text));
+      if (k >= 0) {
+        // Passed to something other than a call site, such as another client.
+        owner = sites.findLast((s) => s <= k && callEnd(flat, s) >= k);
+        if (owner === undefined) return;
+      }
+    }
+    owner ??= sites.findLast((s) => s < j && j - s <= WINDOW) ?? sites.find((s) => s > j && s - j <= WINDOW);
     if (owner !== undefined) owners.add(owner);
   });
   return owners;
@@ -335,9 +432,9 @@ function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
  * nothing in the project.
  */
 function settle(hits: Hit[]): Finding[] {
-  const builtBy = (fenced: boolean) => new Set(hits.filter((h) => !h.viaImport && (fenced || !h.fenced)).map((h) => h.rule));
-  const inCode = builtBy(false);
-  const inDocs = builtBy(true);
+  const built = hits.filter((h) => !h.viaImport);
+  const inCode = new Set(built.filter((h) => !h.fenced).map((h) => h.rule));
+  const inDocs = new Set(built.map((h) => h.rule));
   return hits
     .filter((h) => !(h.viaImport && (h.fenced ? inDocs : inCode).has(h.rule)))
     .map(({ order: _o, viaImport: _v, fenced: _f, ...finding }) => finding);
@@ -398,8 +495,10 @@ function walk(path: string, seen: Set<string>, out: Walk, named = false): void {
   // Only a named path or a repository root is worth a git call; below that git has already answered.
   const listed = named || names.includes('.git') ? gitFiles(path) : undefined;
   const children = listed ?? names.sort();
+  // git lists an untracked virtualenv's files, and the walk below never sees its root.
+  const venvs = listed?.filter((p) => p.endsWith('/pyvenv.cfg')).map((p) => p.slice(0, -'pyvenv.cfg'.length)) ?? [];
   for (const child of children) {
-    if (child.split('/').some((part) => SKIP_DIRS.has(part))) continue;
+    if (child.split('/').some((part) => SKIP_DIRS.has(part)) || venvs.some((v) => child.startsWith(v))) continue;
     walk(resolve(path, child), seen, out);
   }
 }

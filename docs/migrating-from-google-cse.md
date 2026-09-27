@@ -2,7 +2,7 @@
 
 Google's Custom Search JSON API is [closed to new customers, and existing customers have until **2027-01-01**](https://developers.google.com/custom-search/v1/overview) to move. Google's own suggested successor, Vertex AI Search, is a different API with a different response shape and a paid account.
 
-This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**, except LangChain JS, whose tool has no endpoint to change and needs a short subclass.
+This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**, except LangChain JS, whose tool has no endpoint to change and needs a short subclass, and PHP code still on the legacy `Google_Service_Customsearch` class.
 
 To see which of these recipes your code needs, and where, run `npx cse-bridge@latest scan .` in your project. It lists every call site it recognises, marks the ones already repointed, and prints the change from this page under each one that isn't. It exits 1 while any call site still needs a change, so it also works as a CI check once you're done.
 
@@ -28,7 +28,7 @@ Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS
 
 ## Node — `@googleapis/customsearch`
 
-The client takes `rootUrl` at construction. Note the **trailing slash** — the library concatenates paths onto it.
+The client takes `rootUrl` at construction. The trailing slash matches Google's own default, `https://customsearch.googleapis.com/`, though 12.0.1 works without it too.
 
 ```js
 import { customsearch } from '@googleapis/customsearch';
@@ -186,6 +186,8 @@ search.results("rust async runtime", num_results=3)
 
 Everything downstream — `GoogleSearchRun`, `GoogleSearchResults`, agent toolkits that take a `GoogleSearchAPIWrapper` — works unchanged, because they all go through `search_engine`.
 
+A tool from `load_tools(["google-search"])`, which langchain-community had until 0.4, holds its wrapper in `api_wrapper`, so the same line becomes `tools[0].api_wrapper.search_engine = build(...)`. That was checked against 0.3.31.
+
 Verified output of `.results("rust async runtime", num_results=3)`:
 
 ```
@@ -226,7 +228,7 @@ Run against the bridge with `@langchain/community` 1.1.29, `invoke('widgets')` r
 
 ## Go, Java, Ruby, PHP, .NET
 
-All the Google client libraries expose a base/root URL setter. The bridge cares only about the path `/customsearch/v1`, so any of these work:
+All the Google client libraries take a base or root URL. The bridge cares only about the path `/customsearch/v1`, so any of these work:
 
 **Go** (`google.golang.org/api/customsearch/v1`):
 
@@ -246,7 +248,7 @@ CustomSearchAPI cs = new CustomSearchAPI.Builder(transport, jsonFactory, null)
     .build();
 ```
 
-Releases up to `v1-rev86-1.25.0` call the class `Customsearch`. The builder is the same.
+Releases before `v1-rev20200917` call the class `Customsearch`. The builder is the same.
 
 **Ruby** (`google-apis-customsearch_v1`):
 
@@ -278,7 +280,7 @@ var service = new CustomSearchAPIService(new BaseClientService.Initializer
 
 Semantic Kernel's `GoogleConnector` and `GoogleTextSearch` take the same `Initializer`, so pass one with `BaseUri` set instead of the constructor that takes only an API key.
 
-Each of these was run against the bridge once by hand, outside the automated checks: google.golang.org/api v0.299.0, google-api-services-customsearch v1-rev20240821-2.0.0, google-apis-customsearch_v1 0.25.0, google/apiclient 2.20.1, Google.Apis.CustomSearchAPI.v1 1.74 and Microsoft.SemanticKernel.Plugins.Web 1.80.1-alpha. Ruby is the one that needs the trailing slash. Without it the request fails with `Invalid port number`.
+Each of these was run against the bridge once by hand, and none of them is in the test suite: google.golang.org/api v0.299.0, google-api-services-customsearch v1-rev20240821-2.0.0, google-apis-customsearch_v1 0.25.0, google/apiclient 2.20.1, Google.Apis.CustomSearchAPI.v1 1.74 and Microsoft.SemanticKernel.Plugins.Web 1.80.1-alpha. Ruby is the one that needs the trailing slash. Without it the request fails with `Invalid port number`.
 
 ---
 
