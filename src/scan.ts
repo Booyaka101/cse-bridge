@@ -30,10 +30,11 @@ export interface Rule {
    * that import a client just use its types.
    */
   imports?: RegExp;
-  /** Seen within WINDOW lines of a call site, the client has already been pointed elsewhere. */
+  /**
+   * Seen within WINDOW lines of a call site, the client has already been pointed elsewhere.
+   * Not in a trailing comment, and not on a line naming a googleapis.com host.
+   */
   override: RegExp | null;
-  /** The override is usually written before the call rather than inside or after it. */
-  overrideFirst?: true;
   outOfScope?: true;
   fix: (bridgeUrl: string) => string;
 }
@@ -65,7 +66,7 @@ export interface ScanResult {
 
 export const DEFAULT_BRIDGE_URL = 'http://localhost:8080';
 export const WINDOW = 5;
-export const SKIP_DIRS = new Set(['node_modules', '.git', 'vendor', 'dist', 'build', '.venv', 'venv', '__pycache__', 'target']);
+export const SKIP_DIRS = new Set(['node_modules', '.git', 'vendor', 'dist', 'build', 'target', 'coverage', '.next', '.nuxt', '.venv', 'venv', 'site-packages', '__pycache__', '.tox', '.nox']);
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SNIFF_BYTES = 8 * 1024;
 const SNIPPET_MAX = 200;
@@ -78,7 +79,7 @@ export const RULES: readonly Rule[] = [
     lang: 'http',
     // Not the OpenSearch template every response carries in url.template, the
     // bridge's included, which would flag every recorded response.
-    match: /googleapis\.com\/customsearch\/v1(?!\?q=\{searchTerms\})|customsearch\.googleapis\.com/,
+    match: /googleapis\.com\/customsearch\/v1(?!\?q=\{searchTerms\}|element)|customsearch\.googleapis\.com/,
     override: null,
     fix: (b) => `swap the host: ${b}/customsearch/v1`,
   },
@@ -87,25 +88,26 @@ export const RULES: readonly Rule[] = [
     lang: 'node',
     // `customsearch)(` is the call TypeScript's CommonJS output makes. The class is what
     // the factory returns, and some code builds it directly.
-    match: /\bcustomsearch\)?\(|\bcustomsearch_v1\.Customsearch\s*\(/,
+    match: /(?<!\bfunction\s+)\bcustomsearch\)?\(|\bcustomsearch_v1\.Customsearch\s*\(/,
     imports: /@googleapis\/customsearch/,
-    override: /\brootUrl\b/,
+    // The services ignore a rootUrl given to google.options().
+    override: /^(?!.*\bgoogle\.options\s*\().*\brootUrl\b/,
     fix: (b) => `rootUrl: '${b}/'`,
   },
   {
     id: 'python-client',
     lang: 'python',
-    // The second branch is the first argument of a build( call split across
-    // lines. The optional backslashes are a notebook's JSON-escaped quotes.
-    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?\\?["']customsearch\\?["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
-    override: /\bapi_endpoint\b|\bclient_options\s*=/,
+    // The second branch is the first argument of a build( call split across lines.
+    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?["']customsearch["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
+    // Not the client_options of another Google client, such as Vertex AI Search's.
+    override: /\bapi_endpoint\b|(?<!Client\s*\(.*)\bclient_options\s*=/,
     fix: (b) => `client_options=ClientOptions(api_endpoint="${b}")`,
   },
   {
     id: 'langchain',
     lang: 'python',
     // Not a class statement: some projects vendor their own copy of the wrapper.
-    match: /(?<!\bclass\s+)\bGoogleSearchAPIWrapper\s*\(/,
+    match: /(?<!\bclass\s+)\bGoogleSearchAPIWrapper\s*\(|\bload_tools\s*\(.*["']google-search(?:-results-json)?["']/,
     imports: /(?<!\bclass\s+)\bGoogleSearchAPIWrapper\b/,
     // The wrapper's validator always builds its own search_engine, so only an
     // assignment after construction repoints it.
@@ -113,6 +115,14 @@ export const RULES: readonly Rule[] = [
     fix: (b) =>
       `search.search_engine = build("customsearch", "v1", developerKey=KEY, client_options=ClientOptions(api_endpoint="${b}"))` +
       '  # after construction; extra="forbid" rejects client_options',
+  },
+  {
+    id: 'langchain-js',
+    lang: 'node',
+    // The tool fetches a hardcoded Google URL, so a subclass is the only way to repoint it.
+    match: /\bnew\s+GoogleCustomSearch\s*\(/,
+    override: null,
+    fix: (b) => `subclass GoogleCustomSearch and fetch ${b}/customsearch/v1 in _call`,
   },
   {
     id: 'go',
@@ -125,7 +135,7 @@ export const RULES: readonly Rule[] = [
   {
     id: 'java',
     lang: 'java',
-    match: /\b(?:Customsearch|CustomSearchAPI)\.Builder\s*\(/,
+    match: /\b(?:Customsearch|CustomSearchAPI)\.Builder\s*\(|\bnew\s+(?:[\w.]*\.)?(?:Customsearch|CustomSearchAPI)\s*\(/,
     imports: /com\.google\.api\.services\.customsearch/,
     override: /\bsetRootUrl\s*\(/,
     fix: (b) => `.setRootUrl("${b}/")`,
@@ -143,15 +153,25 @@ export const RULES: readonly Rule[] = [
     lang: 'php',
     match: /\bnew\s+[\w\\]*(?:CustomSearchAPI|Google_Service_Customsearch)\s*\(/,
     imports: /\bCustomSearchAPI\b|\bGoogle_Service_Customsearch\b/,
-    // base_path goes on the client that the service is then built from.
-    override: /\bbase_path\b/,
-    overrideFirst: true,
-    fix: (b) => `$client->setConfig('base_path', '${b}');`,
+    // The service's second argument. The client's base_path setting does not reach it, and
+    // the legacy Google_Service_Customsearch class has no such argument.
+    override: /\bnew\s+[\w\\]*CustomSearchAPI\s*\([^,()]+,\s*\S|\brootUrl\s*:/,
+    fix: (b) => `new Google\\Service\\CustomSearchAPI($client, '${b}/')`,
+  },
+  {
+    id: 'dotnet',
+    lang: 'dotnet',
+    // Semantic Kernel's GoogleConnector and GoogleTextSearch take the same Initializer.
+    match: /\bnew\s+(?:[\w.]*\.)?(?:CustomSearchAPIService|CustomsearchService|GoogleConnector|GoogleTextSearch)\s*\(/,
+    imports: /\bGoogle\.Apis\.(?:CustomSearchAPI|Customsearch)\.v1\b/,
+    override: /\bBaseUri\s*=/,
+    fix: (b) => `new BaseClientService.Initializer { ApiKey = key, BaseUri = "${b}/" }`,
   },
   {
     id: 'widget',
     lang: 'html',
-    match: /cse\.google\.com\/cse\.js|www\.google\.com\/cse\/cse\.js|<gcse:/,
+    // v1element is the JSON endpoint behind the widget, which the bridge doesn't serve either.
+    match: /cse\.google\.com\/cse\.js|www\.google\.com\/cse\/cse\.js|<gcse:|googleapis\.com\/customsearch\/v1element|cse\.google\.com\/cse\/element\/v1/,
     override: null,
     outOfScope: true,
     fix: () => WIDGET_MESSAGE,
@@ -167,6 +187,7 @@ for (const [lang, names] of Object.entries({
   java: ['java', 'kt', 'kts', 'groovy', 'scala', 'kotlin'],
   ruby: ['rb', 'rake', 'gemspec', 'ruby'],
   php: ['php', 'phtml'],
+  dotnet: ['cs', 'csx', 'csharp', 'c#'],
 })) {
   for (const name of names) LANG_OF.set(name, lang);
 }
@@ -179,9 +200,22 @@ const MARKDOWN = new Set(['.md', '.mdx', '.markdown']);
  */
 function codeOf(line: string, lang: string | undefined): string {
   const code = line.replace(/^\s*(?:\/\*.*?\*\/\s*)+/, '');
-  // `#` starts a private field in JavaScript and an attribute as `#[` in PHP.
-  const hash = lang === 'node' ? undefined : lang === 'php' ? /^\s*#(?![!\[])/ : /^\s*#(?!!)/;
+  const hash = lang !== undefined && lang in HASH_COMMENT ? HASH_COMMENT[lang] : /^\s*#(?=\s|#|$)/;
   return /^\s*(?:\/\/|\/\*|\*(?=\s|$)|<!--)/.test(code) || hash?.test(code) ? '' : code;
+}
+
+/**
+ * A line-leading `#` that starts a comment. It is a private field in JavaScript, a `#[`
+ * attribute in PHP and `#{` interpolation in a Ruby heredoc. In a file of no known language
+ * it takes a space after it, so C's `#define` is code.
+ */
+const HASH_COMMENT: Record<string, RegExp | null> = { node: null, php: /^\s*#(?![!\[])/, ruby: /^\s*#(?![!{])/, python: /^\s*#(?!!)/ };
+
+const TRAILING_COMMENT: Record<string, RegExp> = { python: /\s#.*$/, ruby: /\s#.*$/, php: /\s(?:\/\/|#).*$/, '*': /\s(?:\/\/|#).*$/ };
+
+/** The line without a trailing comment, where a TODO can name an override that isn't there yet. */
+function beforeComment(line: string, lang: string | undefined): string {
+  return line.replace(TRAILING_COMMENT[lang ?? ''] ?? /\s\/\/.*$/, '');
 }
 
 /**
@@ -197,9 +231,21 @@ interface Unit {
   fenced: boolean;
 }
 
+/** A notebook keeps each line of a cell as a JSON string on a line of its own. */
+function notebookLine(line: string): string {
+  const m = /^(\s*)("(?:[^"\\]|\\.)*"),?\s*$/.exec(line);
+  if (m === null) return line;
+  try {
+    return m[1] + (JSON.parse(m[2]!) as string).replace(/\r?\n$/, '');
+  } catch {
+    return line;
+  }
+}
+
 function unitsOf(file: string, text: string): Unit[] {
-  const lines = text.split(/\r?\n/);
   const ext = extname(file).toLowerCase();
+  let lines = text.split(/\r?\n/);
+  if (ext === '.ipynb') lines = lines.map(notebookLine);
   if (!MARKDOWN.has(ext)) return [{ lang: LANG_OF.get(ext.slice(1)), lines, first: 1, fenced: false }];
 
   // Prose in a README names these libraries all the time; only code blocks are call sites.
@@ -228,18 +274,21 @@ function applies(rule: Rule, lang: string | undefined): boolean {
 
 /**
  * The sites that an override has repointed. Each override line belongs to one site
- * within WINDOW lines: the nearest at or above it, as in a multi-line call or an
- * assignment after construction, or else the nearest below. So a "before" line does not
- * borrow the override of the "after" line next to it, nor the next call its predecessor's.
+ * within WINDOW lines: its own line, else the one below that uses the variable it assigns,
+ * else the nearest above it, as in a multi-line call or an assignment after construction, else the
+ * nearest below. So a "before" line does not borrow the override of the "after" line
+ * next to it, nor the next call its predecessor's.
  */
-function repointed(rule: Rule, lines: string[], sites: number[]): Set<number> {
+function repointed(rule: Rule, lang: string | undefined, lines: string[], sites: number[]): Set<number> {
   const owners = new Set<number>();
   if (rule.override === null) return owners;
   lines.forEach((line, j) => {
-    if (!rule.override!.test(line)) return;
-    const above = sites.findLast((s) => s <= j && j - s <= WINDOW);
-    const below = sites.find((s) => s >= j && s - j <= WINDOW);
-    const owner = rule.overrideFirst ? (below ?? above) : (above ?? below);
+    const code = beforeComment(line, lang);
+    if (!rule.override!.test(code) || /googleapis\.com/.test(code)) return;
+    const below = sites.filter((s) => s > j && s - j <= WINDOW);
+    const assigned = /^\s*(?:(?:const|let|var|val|final)\s+)?(\$?\w+)\s*:?=(?!=)/.exec(code)?.[1];
+    const user = assigned === undefined ? undefined : below.find((s) => new RegExp(`(?<![\\w$])${assigned.replace('$', '\\$')}\\b`).test(lines[s]!));
+    const owner = sites.includes(j) ? j : (user ?? sites.findLast((s) => s < j && j - s <= WINDOW) ?? below[0]);
     if (owner !== undefined) owners.add(owner);
   });
   return owners;
@@ -268,7 +317,7 @@ function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
       });
       const viaImport = calls.length === 0;
       const sites = viaImport ? imports : calls;
-      const owners = repointed(rule, lines, sites);
+      const owners = repointed(rule, unit.lang, lines, sites);
       for (const i of sites) {
         const line = lines[i]!;
         if (rule.id === 'raw-url' && bridged.test(line)) continue;
@@ -282,11 +331,16 @@ function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
 
 /**
  * Drops the import lines of any rule that some code among `hits` builds. A Markdown
- * example building one does not count, since it builds nothing in the project.
+ * example building one only answers for other Markdown examples, since it builds
+ * nothing in the project.
  */
 function settle(hits: Hit[]): Finding[] {
-  const built = new Set(hits.filter((h) => !h.viaImport && !h.fenced).map((h) => h.rule));
-  return hits.filter((h) => !(h.viaImport && built.has(h.rule))).map(({ order: _o, viaImport: _v, fenced: _f, ...finding }) => finding);
+  const builtBy = (fenced: boolean) => new Set(hits.filter((h) => !h.viaImport && (fenced || !h.fenced)).map((h) => h.rule));
+  const inCode = builtBy(false);
+  const inDocs = builtBy(true);
+  return hits
+    .filter((h) => !(h.viaImport && (h.fenced ? inDocs : inCode).has(h.rule)))
+    .map(({ order: _o, viaImport: _v, fenced: _f, ...finding }) => finding);
 }
 
 /** Findings for one file's text. `file` is the path reported, and its extension picks the language. */
@@ -339,6 +393,8 @@ function walk(path: string, seen: Set<string>, out: Walk, named = false): void {
     out.warnings.push(`${path}: ${(err as Error).message}`);
     return;
   }
+  // A virtualenv, whatever it is called.
+  if (!named && names.includes('pyvenv.cfg')) return;
   // Only a named path or a repository root is worth a git call; below that git has already answered.
   const listed = named || names.includes('.git') ? gitFiles(path) : undefined;
   const children = listed ?? names.sort();

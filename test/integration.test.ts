@@ -211,7 +211,10 @@ describe('error envelopes over HTTP', () => {
     const body = await res.json();
     assert.equal(body.error.code, 404);
     assert.equal(body.error.status, 'NOT_FOUND');
-    assert.match(body.error.errors[0].message, /customsearch\/v1/);
+    assert.equal(
+      body.error.errors[0].message,
+      'No endpoint at /v1/search. This bridge serves /customsearch/v1 (also as /customsearch/v1/siterestrict) and /healthz.',
+    );
   });
 
   test('POST is refused with an envelope', async () => {

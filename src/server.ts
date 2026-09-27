@@ -218,7 +218,7 @@ export function createBridge(opts: BridgeOptions): Bridge {
     }
 
     if (url.pathname !== SEARCH_PATH && url.pathname !== SITE_RESTRICT_PATH) {
-      sendError(res, notFound(`No endpoint at ${url.pathname}. This bridge serves ${SEARCH_PATH} and ${HEALTH_PATH}.`));
+      sendError(res, notFound(`No endpoint at ${url.pathname}. This bridge serves ${SEARCH_PATH} (also as ${SITE_RESTRICT_PATH}) and ${HEALTH_PATH}.`));
       finish(404);
       return;
     }

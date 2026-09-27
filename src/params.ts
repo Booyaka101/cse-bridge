@@ -142,7 +142,9 @@ export function parseParams(searchParams: URLSearchParams): CseParams {
   }
   const num = Math.min(rawNum, MAX_NUM);
 
-  const start = integer(searchParams, 'start', 1);
+  // Semantic Kernel's Google connector asks for its first page as start=0.
+  const requested = integer(searchParams, 'start', 1);
+  const start = requested === 0 ? 1 : requested;
   if (start < 1 || start > MAX_START) {
     throw invalidArgument(
       `Invalid value for parameter 'start': ${start}. Expected a value between 1 and ${MAX_START}.`,

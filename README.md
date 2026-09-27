@@ -103,11 +103,11 @@ needs-change  raw-url        web/search.js:2
 3 call sites: 2 need a change, 1 already repointed, 0 out of scope
 ```
 
-It knows the Node, Python, LangChain, Go, Java, Ruby and PHP clients and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site with that change within 5 lines counts as repointed. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while any call site still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope and don't affect the exit code, since the bridge serves only the JSON API.
+It knows the Node, Python, LangChain (Python and JS), Go, Java, Ruby, PHP and .NET clients, Semantic Kernel's Google connector, and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site with that change within 5 lines counts as repointed. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while any call site still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope and don't affect the exit code, since the bridge serves only the JSON API.
 
-It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. It can't tell where an override points either, so any `rootUrl`, `api_endpoint` or `client_options=` within those 5 lines counts. Lines that start with a comment marker are ignored, but the inside of a docstring or a multi-line comment is still read. Treat a clean scan as a good sign rather than proof.
+It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. It can't tell where an override points either, so any `rootUrl`, `api_endpoint` or `client_options=` within those 5 lines counts, unless it sits in a trailing comment or on a line naming a `googleapis.com` host. When two call sites share those lines, an override assigned to a variable goes to the call that uses it. Lines that start with a comment marker are ignored, but the inside of a docstring or a multi-line comment is still read. Treat a clean scan as a good sign rather than proof.
 
-In a git repository it skips whatever `.gitignore` excludes, unless you name that directory on the command line. `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv` and `venv` are skipped everywhere, and so are binaries and files over 2 MB, with a warning for source files. In Markdown only fenced code blocks count.
+In a git repository it skips whatever `.gitignore` excludes, unless you name that directory on the command line. `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`, `site-packages`, `__pycache__` and the usual virtualenv and framework build directories are skipped everywhere, and so is any directory holding a `pyvenv.cfg`. So are binaries and files over 2 MB, with a warning for source files. In Markdown only fenced code blocks count, and a Jupyter notebook is read cell line by cell line.
 
 ---
 
@@ -284,6 +284,7 @@ A few behaviours are worth knowing:
 
 - **`num` above 10 clamps to 10** instead of erroring. Google rejects it; clamping is friendlier and keeps `start=1,11,21` loops walking.
 - **`start` above 91 returns Google's exact error envelope**, including `status: "INVALID_ARGUMENT"` and `errors[0].reason: "badRequest"`.
+- **`start=0` reads as the first page**, since Semantic Kernel's Google connector sends it. Below 0 is a 400.
 - **`dateRestrict`** (`d7`, `m6`, …) maps onto SearXNG's coarser `day`/`week`/`month`/`year` buckets, always rounding **up** — you get a superset of what you asked for, never a subset.
 - **`siteSearch`, `fileType`, `exactTerms`, `excludeTerms`** become search operators in the backend query, since SearXNG has no dedicated parameters for them. `siteSearch` is also checked against every result, and stays inside the cx's site list (see [Bringing your PSE over](#bringing-your-pse-over)).
 - **`sort=date`** reorders by the `publishedDate` SearXNG attaches to news and paper results; undated results keep their relevance order and sit last.
@@ -490,9 +491,9 @@ npm test
 ```
 
 ```
-# tests 353
+# tests 366
 # suites 57
-# pass 353
+# pass 366
 # fail 0
 ```
 
@@ -519,7 +520,7 @@ CSE_BRIDGE_LIVE=1 SEARXNG_URL=http://localhost:8888 npm test
 - Discussion on [r/selfhosted](https://old.reddit.com/r/selfhosted/comments/1vb7psc/new_project_megathread_week_of_30_jul_2026/p1g1hof/).
 - Background: the [Hacker News thread on the shutdown](https://news.ycombinator.com/item?id=48942250) is worth reading for what people are migrating to. Note it is archived, so you cannot reply to it.
 
-**The most useful thing you can report:** a client library that will *not* accept an endpoint override. The whole premise of this project is that yours will — Node, Python and LangChain are verified, and the others in [the migration guide](docs/migrating-from-google-cse.md#go-java-ruby-php) follow the same documented mechanism but are not covered by the acceptance checks. If you hit one that can't be repointed, please [open an issue](https://github.com/Booyaka101/cse-bridge/issues); that is the case that breaks the premise and I want to know about it.
+**The most useful thing you can report:** a client library that will *not* accept an endpoint override. The whole premise of this project is that yours will. Node, Python and LangChain are covered by the acceptance checks, and the others in [the migration guide](docs/migrating-from-google-cse.md#go-java-ruby-php-net) were each run against the bridge by hand. LangChain JS's `GoogleCustomSearch` is the one known exception so far, and the guide has [a subclass](docs/migrating-from-google-cse.md#langchain-js-googlecustomsearch) that gets around it. If you hit one that can't be repointed, please [open an issue](https://github.com/Booyaka101/cse-bridge/issues); that is the case that breaks the premise and I want to know about it.
 
 Bug reports, missing CSE parameters, and SearXNG engine configurations that produce noticeably better results are all welcome.
 
