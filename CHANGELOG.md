@@ -2,6 +2,35 @@
 
 All notable changes to cse-bridge. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [1.4.0] - 2026-09-27
+
+### Added
+
+- **`cse-bridge scan [path...] [--json] [--bridge-url URL]`** lists the places a codebase calls Google's Custom Search JSON API. It recognises the Node (`@googleapis/customsearch` and `googleapis`), Python (`google-api-python-client`), LangChain (`GoogleSearchAPIWrapper`, `load_tools(["google-search"])` and the JS `GoogleCustomSearch` tool), Go, Java, Ruby, PHP and .NET clients, Semantic Kernel's `GoogleConnector` and `GoogleTextSearch`, plus raw `googleapis.com/customsearch/v1` URLs. Each call site is `needs-change`, printed with the one-line fix from the migration guide, or `repointed` if that guide's override is in the call or within 5 lines of it. A page embedding Google's search widget is `out-of-scope`, since the bridge serves only the JSON API, and doesn't affect the exit code. Exits 1 while any call site needs a change and 2 for bad arguments or a missing path, so it can gate CI. `--json` gives `{version, root, findings, summary}` with forward-slash paths.
+- The fixes follow `--bridge-url` (default `http://localhost:8080`) with the trailing slash each client wants: `rootUrl`, `WithEndpoint`, `setRootUrl`, `root_url`, PHP's root URL argument and .NET's `BaseUri` get one, `api_endpoint` gets none, whatever the URL was typed with.
+- A LangChain JS recipe in the migration guide. `GoogleCustomSearch` fetches a hardcoded Google URL, so the recipe is a subclass whose `_call` asks the bridge. And a .NET recipe, which also covers Semantic Kernel's Google connector.
+- `GET /customsearch/v1/siterestrict` answers like `/customsearch/v1`. Google shut its Site Restricted JSON API down on 8 January 2025, so code still calling `cse.siterestrict.list` (2 of the 22 repositories below, and LangChain's `siterestrict=True`) works again once its client is repointed like any other.
+
+### Changed
+
+- `cse-bridge import` now parses its arguments with Node's `util.parseArgs`, as `scan` does. `--` ends the options, and a bad option gets Node's wording (`Unknown option '--frob'`, `Option '--cx' argument is ambiguous`) instead of the old message. Exit codes are unchanged.
+- `start=0` is read as the first page instead of a 400, because Semantic Kernel's Google connector sends it. Below 0 is still a 400.
+- The 404 for an unknown path names every path the bridge serves.
+
+### Fixed
+
+- The migration guide's PHP recipe set the client's `base_path`, which `Google\Service\CustomSearchAPI` ignores, so requests still went to Google. The root URL is the service's second argument: `new Google\Service\CustomSearchAPI($client, 'http://localhost:8080/')`.
+- The guide's Java recipe named the class `Customsearch`, which is only right before `v1-rev20200917-1.31.0`. Current releases call it `CustomSearchAPI`.
+- The guide now says that a `rootUrl` given to `google.options()` does not reach the customsearch service, and how to repoint a tool from LangChain's `load_tools(["google-search"])`.
+
+### Notes
+
+- Client rules only run on their own language's files, so PHP's `CustomSearchAPI` class does not match the Java client of the same name. In Markdown only fenced code blocks are scanned, each on its own and by its fence tag, so a "before" snippet does not count as repointed because the "after" snippet sits under it. For the same reason each override belongs to one call site: the call it's written in, else the call that uses the variable it's assigned to, else the nearest call above it within 5 lines, else the nearest below. So a client built right after a repointed one still needs a change. An override in a trailing comment, on a line naming a `googleapis.com` host other than in an OAuth scope, or inside some other call, such as `google.options()` or another Google client's constructor, doesn't count, even when that call sits next to the Custom Search one in the same object or list, and nor does one assigned to a variable that only something other than a call site uses.
+- A line that starts with a comment marker is neither a call site nor an override. Code after a leading `/* ... */` on the same line still counts, as does a PHP `#[` attribute, a Ruby `#{` and, in a file of no known language, a C preprocessor line such as `#define`. An import on its own (`require 'google/apis/customsearch_v1'`, a Go or Java type import) is reported only when no code in the scan constructs that client, since most files importing a client only use its types. A Markdown example doesn't count as constructing one.
+- The OpenSearch template every response carries in `url.template` (`https://www.googleapis.com/customsearch/v1?q={searchTerms}...`), the bridge's own included, is not a call site, so recorded responses and test fixtures stay quiet.
+- In a git repository the scan reads what `git ls-files` lists, tracked or untracked, so whatever `.gitignore` excludes is skipped. A directory named on the command line is scanned even when it's ignored. `node_modules`, `.git`, `vendor`, `dist`, `build`, `target`, `coverage`, `.next`, `.nuxt`, `.venv`, `venv`, `site-packages`, `__pycache__`, `.tox` and `.nox` are skipped at any depth, and so is any directory holding a `pyvenv.cfg`, whatever it is called, along with files with a NUL byte in their first 8 KB and files over 2 MB (with a warning if it's source code). UTF-16 files with a byte order mark are read. Symlinks are followed, and each real directory is visited once, so a link loop terminates. A Jupyter notebook, nbformat 3 or 4, is read by its code cells, minified or not, so its comments and multi-line calls read as they do in a `.py` file, and its Markdown cells and outputs are left out.
+- Tried on 22 public repositories that use the API or the widget: 24 call sites (20 through a client library, 4 raw URLs) and 345 widget embeds reported, each one real, and a manual grep of the same trees found no call site it missed. Without the comment, import and class-statement handling above, the rules report 10 more there, all false: type-only imports, a commented-out constructor and two vendored classes named `GoogleSearchAPIWrapper`.
+
 ## [1.3.0] - 2026-09-23
 
 ### Added

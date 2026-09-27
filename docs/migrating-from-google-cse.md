@@ -2,7 +2,9 @@
 
 Google's Custom Search JSON API is [closed to new customers, and existing customers have until **2027-01-01**](https://developers.google.com/custom-search/v1/overview) to move. Google's own suggested successor, Vertex AI Search, is a different API with a different response shape and a paid account.
 
-This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**.
+This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**, except LangChain JS, whose tool has no endpoint to change and needs a short subclass, and PHP code still on the legacy `Google_Service_Customsearch` class.
+
+To see which of these recipes your code needs, and where, run `npx cse-bridge@latest scan .` in your project. It lists every call site it recognises, marks the ones already repointed, and prints the change from this page under each one that isn't. It exits 1 while any call site still needs a change, so it also works as a CI check once you're done.
 
 Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS` is unset, so any `key` value is accepted. Substitute your own host and key as needed.
 
@@ -14,7 +16,8 @@ Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS
 - [Node — googleapis (the monolithic package)](#node--googleapis-the-monolithic-package)
 - [Python — google-api-python-client](#python--google-api-python-client)
 - [LangChain — GoogleSearchAPIWrapper](#langchain--googlesearchapiwrapper)
-- [Go, Java, Ruby, PHP](#go-java-ruby-php)
+- [LangChain JS (GoogleCustomSearch)](#langchain-js-googlecustomsearch)
+- [Go, Java, Ruby, PHP, .NET](#go-java-ruby-php-net)
 - [Raw HTTP / curl](#raw-http--curl)
 - [What your `cx` becomes](#what-your-cx-becomes)
 - [What happens to `pagemap`](#what-happens-to-pagemap)
@@ -25,7 +28,7 @@ Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS
 
 ## Node — `@googleapis/customsearch`
 
-The client takes `rootUrl` at construction. Note the **trailing slash** — the library concatenates paths onto it.
+The client takes `rootUrl` at construction. The trailing slash matches Google's own default, `https://customsearch.googleapis.com/`, though 12.0.1 works without it too.
 
 ```js
 import { customsearch } from '@googleapis/customsearch';
@@ -85,6 +88,8 @@ import { google } from 'googleapis';
 const client = google.customsearch({ version: 'v1', rootUrl: 'http://localhost:8080/' });
 const res = await client.cse.list({ q: 'test', cx: 'default', auth: 'k' });
 ```
+
+Give `rootUrl` to the service, or to a single call as its second argument. A `rootUrl` set globally with `google.options()` doesn't reach it (googleapis 182), and requests still go to Google.
 
 ---
 
@@ -181,6 +186,8 @@ search.results("rust async runtime", num_results=3)
 
 Everything downstream — `GoogleSearchRun`, `GoogleSearchResults`, agent toolkits that take a `GoogleSearchAPIWrapper` — works unchanged, because they all go through `search_engine`.
 
+A tool from `load_tools(["google-search"])`, which langchain-community had until 0.4, holds its wrapper in `api_wrapper`, so the same line becomes `tools[0].api_wrapper.search_engine = build(...)`. That was checked against 0.3.31.
+
 Verified output of `.results("rust async runtime", num_results=3)`:
 
 ```
@@ -196,9 +203,32 @@ Verified output of `.results("rust async runtime", num_results=3)`:
 
 ---
 
-## Go, Java, Ruby, PHP
+## LangChain JS (`GoogleCustomSearch`)
 
-All the Google client libraries expose a base/root URL setter. The bridge cares only about the path `\/customsearch\/v1`, so any of these work:
+The tool in `@langchain/community` fetches a hardcoded `https://www.googleapis.com/customsearch/v1` and takes no base URL, so subclass it and make the request yourself. The output is the same JSON array of `title`, `link` and `snippet` the tool returns:
+
+```js
+import { GoogleCustomSearch } from '@langchain/community/tools/google_custom_search';
+
+class BridgeCustomSearch extends GoogleCustomSearch {
+  async _call(input) {
+    const res = await fetch(`http://localhost:8080/customsearch/v1?key=${this.apiKey}&cx=${this.googleCSEId}&q=${encodeURIComponent(input)}`);
+    if (!res.ok) throw new Error(`Got ${res.status} error from custom search: ${res.statusText}`);
+    const { items = [] } = await res.json();
+    return JSON.stringify(items.map(({ title, link, snippet }) => ({ title, link, snippet })));
+  }
+}
+
+const tools = [new BridgeCustomSearch({ apiKey: 'k', googleCSEId: 'default' })];
+```
+
+Run against the bridge with `@langchain/community` 1.1.29, `invoke('widgets')` returned 10 results.
+
+---
+
+## Go, Java, Ruby, PHP, .NET
+
+All the Google client libraries take a base or root URL. The bridge cares only about the path `/customsearch/v1`, so any of these work:
 
 **Go** (`google.golang.org/api/customsearch/v1`):
 
@@ -212,11 +242,13 @@ svc, err := customsearch.NewService(ctx,
 **Java** (`google-api-services-customsearch`):
 
 ```java
-Customsearch cs = new Customsearch.Builder(transport, jsonFactory, null)
+CustomSearchAPI cs = new CustomSearchAPI.Builder(transport, jsonFactory, null)
     .setApplicationName("app")
     .setRootUrl("http://localhost:8080/")
     .build();
 ```
+
+Releases before `v1-rev20200917` call the class `Customsearch`. The builder is the same.
 
 **Ruby** (`google-apis-customsearch_v1`):
 
@@ -231,11 +263,24 @@ service.key = 'k'
 ```php
 $client = new Google\Client();
 $client->setDeveloperKey('k');
-$client->setConfig('base_path', 'http://localhost:8080');
-$service = new Google\Service\CustomSearchAPI($client);
+$service = new Google\Service\CustomSearchAPI($client, 'http://localhost:8080/');
 ```
 
-These follow the same documented mechanism as the two verified clients above, but are not part of this project's verified acceptance checks.
+The root URL is the service's second argument. The client's `base_path` setting never reaches it, and the legacy `Google_Service_Customsearch` class has no such argument, so move to `Google\Service\CustomSearchAPI` first.
+
+**.NET** (`Google.Apis.CustomSearchAPI.v1`):
+
+```csharp
+var service = new CustomSearchAPIService(new BaseClientService.Initializer
+{
+    ApiKey = "k",
+    BaseUri = "http://localhost:8080/",
+});
+```
+
+Semantic Kernel's `GoogleConnector` and `GoogleTextSearch` take the same `Initializer`, so pass one with `BaseUri` set instead of the constructor that takes only an API key.
+
+Each of these was run against the bridge once by hand, and none of them is in the test suite: google.golang.org/api v0.299.0, google-api-services-customsearch v1-rev20240821-2.0.0, google-apis-customsearch_v1 0.25.0, google/apiclient 2.20.1, Google.Apis.CustomSearchAPI.v1 1.74 and Microsoft.SemanticKernel.Plugins.Web 1.80.1-alpha. Ruby is the one that needs the trailing slash. Without it the request fails with `Invalid port number`.
 
 ---
 
@@ -345,6 +390,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `totalResults` | Estimated web-wide total, often millions | Lower bound of what was actually retrieved; grows as you page | If you **display** it, the number gets much smaller. If you **loop** on it, you are fine. |
 | `num > 10` | 400 error | Clamped to 10 | Strictly friendlier. |
 | `start > 91` | 400 error | 400 error, identical envelope | No change. |
+| `start=0` | Undocumented, but Semantic Kernel's Google connector sends it for the first page | Read as `start=1` (v1.4.0+) | Negative values are still a 400. |
 | Max results | 100 per query | 100 per query | No change. |
 | `pagemap` | Present for many results | Off by default; reconstructed from the page when enabled (v1.2.0+) | See [What happens to `pagemap`](#what-happens-to-pagemap) before you rely on it. |
 | `searchType=image` | Supported | Supported (v1.1.0+) | `link` is the image, `image.contextLink` the page, as on Google. `imgSize`/`imgType`/`imgColorType`/`imgDominantColor` validate against Google's enums but do not filter — SearXNG has no backend for them. `image.thumbnailWidth`/`thumbnailHeight` are omitted. |
@@ -352,6 +398,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `sort` | Several sort expressions | Only `date` / `date:a` / `date:d` act | Others are accepted, then ignored. |
 | Rate limits | 100 free queries/day, then paid | Whatever your SearXNG and its upstream engines tolerate | You now own this. |
 | Site-restricted `cx` | Searched Google's index of just those sites | Asks general engines, keeps only on-list results (v1.3.0+) | A narrow or long site list returns fewer results than it did on Google. |
+| `/customsearch/v1/siterestrict` | Shut down in January 2025 | Served, same as `/customsearch/v1` (v1.4.0+) | Code still calling `cse.siterestrict.list` works again after the usual repoint. |
 | `promotions`, `context` | Present for some PSEs | Absent | Rarely used. |
 
 ### Two shapes to verify in your own code

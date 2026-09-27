@@ -1,0 +1,944 @@
+/**
+ * `cse-bridge scan`: each rule finds its client and tells a repointed one from
+ * one that still talks to Google, over real files on disk and through the CLI.
+ */
+
+import { test, describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, sep } from 'node:path';
+
+import { MAX_FILE_BYTES, RULES, SKIP_DIRS, WIDGET_MESSAGE, runScan, scanText, type Finding } from '../src/scan.ts';
+
+const repo = join(import.meta.dirname, '..');
+const fixtures = join(import.meta.dirname, 'fixtures', 'scan');
+const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as { version: string };
+const BRIDGE = 'http://localhost:8080';
+
+function run(argv: string[], cwd = fixtures) {
+  let stdout = '';
+  let stderr = '';
+  const code = runScan(argv, { stdout: (t) => (stdout += t), stderr: (t) => (stderr += t), cwd });
+  return { code, stdout, stderr };
+}
+
+/** A temp directory holding `files`, removed after the test. */
+function tree(t: { after: (fn: () => void) => void }, files: Record<string, string | Buffer>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cse-scan-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), content);
+  }
+  return dir;
+}
+
+const slashed = (path: string) => path.split(sep).join('/');
+const pick = (findings: Finding[]) => findings.map((f) => `${f.status} ${f.rule} ${f.line}`);
+
+// One call site that still goes to Google and one already pointed at the bridge, per rule.
+const CASES: Array<{ rule: string; file: string; before: string; after: string }> = [
+  {
+    rule: 'raw-url',
+    file: 'fetch.js',
+    before: `const res = await fetch('https://www.googleapis.com/customsearch/v1?key=' + key);`,
+    after: `const url = 'https://customsearch.googleapis.com/customsearch/v1'.replace('https://customsearch.googleapis.com', '${BRIDGE}');`,
+  },
+  {
+    rule: 'node-client',
+    file: 'search.ts',
+    before: `const client = google.customsearch('v1');`,
+    after: `const client = customsearch({ version: 'v1', rootUrl: '${BRIDGE}/' });`,
+  },
+  {
+    rule: 'python-client',
+    file: 'search.py',
+    before: `service = build('customsearch', 'v1', developerKey=KEY)`,
+    after: `service = build("customsearch", "v1", developerKey=KEY,\n    client_options={"api_endpoint": "${BRIDGE}"})`,
+  },
+  {
+    rule: 'langchain',
+    file: 'agent.py',
+    before: `search = GoogleSearchAPIWrapper()`,
+    after: `search = GoogleSearchAPIWrapper()\nsearch.search_engine = engine`,
+  },
+  {
+    rule: 'langchain-js',
+    file: 'agent.ts',
+    before: `const tools = [new GoogleCustomSearch({ apiKey, googleCSEId })];`,
+    after: `const tools = [new BridgeCustomSearch({ apiKey, googleCSEId })];`,
+  },
+  {
+    rule: 'go',
+    file: 'search.go',
+    before: `svc, err := customsearch.NewService(ctx, option.WithAPIKey(key))`,
+    after: `svc, err := customsearch.NewService(ctx,\n\toption.WithEndpoint("${BRIDGE}/"),\n)`,
+  },
+  {
+    rule: 'java',
+    file: 'Search.kt',
+    before: `val cs = CustomSearchAPI.Builder(transport, json, null).build()`,
+    after: `val cs = CustomSearchAPI.Builder(transport, json, null)\n    .setRootUrl("${BRIDGE}/")\n    .build()`,
+  },
+  {
+    rule: 'ruby',
+    file: 'search.rb',
+    before: `service = Google::Apis::CustomsearchV1::CustomSearchAPIService.new`,
+    after: `service = Google::Apis::CustomsearchV1::CustomSearchAPIService.new\nservice.root_url = '${BRIDGE}/'`,
+  },
+  {
+    rule: 'php',
+    file: 'search.php',
+    before: `$service = new \\Google_Service_Customsearch($client);`,
+    after: `$service = new Google\\Service\\CustomSearchAPI($client, '${BRIDGE}/');`,
+  },
+  {
+    rule: 'dotnet',
+    file: 'Search.cs',
+    before: `var service = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key });`,
+    after: `var service = new CustomSearchAPIService(new BaseClientService.Initializer {\n    ApiKey = key,\n    BaseUri = "${BRIDGE}/",\n});`,
+  },
+];
+
+describe('rules', () => {
+  test('every rule is covered by a case here or by the widget test', () => {
+    assert.deepEqual(
+      RULES.map((r) => r.id),
+      [...CASES.map((c) => c.rule), 'widget'],
+    );
+  });
+
+  for (const c of CASES) {
+    test(`${c.rule}: an untouched call site needs a change`, () => {
+      const [finding, ...rest] = scanText(c.file, c.before, BRIDGE);
+      assert.equal(rest.length, 0);
+      assert.equal(finding!.rule, c.rule);
+      assert.equal(finding!.status, 'needs-change');
+      assert.equal(finding!.line, 1);
+      assert.equal(finding!.snippet, c.before.trim());
+    });
+
+    test(`${c.rule}: a call site with its override nearby is repointed`, () => {
+      const found = scanText(c.file, c.after, BRIDGE);
+      if (RULES.find((r) => r.id === c.rule)!.override === null) {
+        assert.deepEqual(found, [], 'nothing left to find');
+      } else {
+        assert.deepEqual(
+          found.map((f) => `${f.status} ${f.rule}`),
+          [`repointed ${c.rule}`],
+        );
+      }
+    });
+  }
+
+  test('widget: always out of scope, with the fixed message and no claim about the widget itself', () => {
+    const html = `<script async src="https://cse.google.com/cse.js?cx=abc"></script>\n<gcse:search></gcse:search>\n<!-- base_path rootUrl -->`;
+    const found = scanText('index.html', html, BRIDGE);
+    assert.deepEqual(pick(found), ['out-of-scope widget 1', 'out-of-scope widget 2']);
+    assert.equal(found[0]!.fix, WIDGET_MESSAGE);
+    assert.equal(WIDGET_MESSAGE, 'cse-bridge serves the JSON API only; this widget is not served by it');
+  });
+
+  test('the fix text matches the migration guide: trailing slash for rootUrl, none for api_endpoint', () => {
+    const fix = (id: string) => RULES.find((r) => r.id === id)!.fix(BRIDGE);
+    assert.equal(fix('raw-url'), 'swap the host: http://localhost:8080/customsearch/v1');
+    assert.equal(fix('node-client'), `rootUrl: 'http://localhost:8080/'`);
+    assert.equal(fix('python-client'), 'client_options=ClientOptions(api_endpoint="http://localhost:8080")');
+    assert.match(fix('langchain'), /^search\.search_engine = build\("customsearch", "v1", .*api_endpoint="http:\/\/localhost:8080"\)\)/);
+    assert.equal(fix('go'), 'option.WithEndpoint("http://localhost:8080/")');
+    assert.equal(fix('java'), '.setRootUrl("http://localhost:8080/")');
+    assert.equal(fix('ruby'), `service.root_url = 'http://localhost:8080/'`);
+    assert.equal(fix('php'), `new Google\\Service\\CustomSearchAPI($client, 'http://localhost:8080/')`);
+    assert.equal(fix('dotnet'), 'new BaseClientService.Initializer { ApiKey = key, BaseUri = "http://localhost:8080/" }');
+    assert.equal(fix('langchain-js'), 'subclass GoogleCustomSearch and fetch http://localhost:8080/customsearch/v1 in _call');
+  });
+});
+
+test('a siterestrict call is left to its client or URL rule, since the bridge serves that path too', () => {
+  const py = "service = build('customsearch', 'v1', developerKey=KEY)\nres = service.cse().siterestrict().list(q=q, cx=CX).execute()";
+  assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1']);
+  const sh = 'curl "https://customsearch.googleapis.com/customsearch/v1/siterestrict?cx=$CX&q=x"';
+  assert.deepEqual(pick(scanText('a.sh', sh, BRIDGE)), ['needs-change raw-url 1']);
+});
+
+describe('proximity', () => {
+  const pad = (n: number) => Array.from({ length: n }, (_, i) => `x${i} = 1`).join('\n');
+
+  test('the override counts up to 5 lines either side and not at 6', () => {
+    const call = 'service = build("customsearch", "v1")';
+    const opt = 'opts = {"api_endpoint": URL}';
+    assert.deepEqual(pick(scanText('a.py', `${call}\n${pad(4)}\n${opt}`, BRIDGE)), ['repointed python-client 1']);
+    assert.deepEqual(pick(scanText('a.py', `${call}\n${pad(5)}\n${opt}`, BRIDGE)), ['needs-change python-client 1']);
+    assert.deepEqual(pick(scanText('a.py', `${opt}\n${pad(4)}\n${call}`, BRIDGE)), ['repointed python-client 6']);
+    assert.deepEqual(pick(scanText('a.py', `${opt}\n${pad(5)}\n${call}`, BRIDGE)), ['needs-change python-client 7']);
+  });
+
+  test('a "before" line does not borrow the override from the "after" line next to it', () => {
+    const js = [
+      "import { customsearch } from '@googleapis/customsearch';",
+      '',
+      '// Before',
+      "const client = customsearch({ version: 'v1' });",
+      '',
+      '// After',
+      `const client = customsearch({ version: 'v1', rootUrl: '${BRIDGE}/' });`,
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 4', 'repointed node-client 7']);
+  });
+
+  test('an override belongs to one call site, so the next call does not borrow its predecessor\'s', () => {
+    const js = ['const bridged = customsearch({', "  version: 'v1',", `  rootUrl: '${BRIDGE}/',`, '});', "const legacy = customsearch({ version: 'v1', auth: KEY });"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['repointed node-client 1', 'needs-change node-client 5']);
+    const py = ['web = GoogleSearchAPIWrapper(k=5)', 'web.search_engine = build("customsearch", "v1", client_options=opts)', 'news = GoogleSearchAPIWrapper(google_cse_id=NEWS_CX)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)).filter((f) => f.includes('langchain')), ['repointed langchain 1', 'needs-change langchain 3']);
+    const go = ['svc, err := customsearch.NewService(ctx,', `\toption.WithEndpoint("${BRIDGE}/"),`, ')', 'legacy, err := customsearch.NewService(ctx, option.WithAPIKey(key))'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['repointed go 1', 'needs-change go 4']);
+  });
+
+  test("PHP's base_path is not an override, since the service ignores it; the root URL argument is", () => {
+    const php = [`$client->setConfig('base_path', '${BRIDGE}');`, '$svc = new CustomSearchAPI($client);', `$bridged = new Google\\Service\\CustomSearchAPI($client, getenv('CSE_ROOT_URL') ?: '${BRIDGE}/');`].join('\n');
+    assert.deepEqual(pick(scanText('a.php', php, BRIDGE)), ['needs-change php 2', 'repointed php 3']);
+    const named = ['$svc = new CustomSearchAPI(', '    $client,', `    rootUrl: '${BRIDGE}/',`, ');'].join('\n');
+    assert.deepEqual(pick(scanText('a.php', named, BRIDGE)), ['repointed php 1']);
+    assert.deepEqual(pick(scanText('a.php', `$svc = new Google_Service_Customsearch($client, '${BRIDGE}/');`, BRIDGE)), ['needs-change php 1']);
+  });
+
+  test('an override assigned to a variable belongs to the call below that uses it', () => {
+    const go = ['legacy, _ := customsearch.NewService(ctx, option.WithAPIKey(k))', `ep := option.WithEndpoint("${BRIDGE}/")`, 'bridged, _ := customsearch.NewService(ctx, ep)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 3']);
+    const js = ["const legacy = customsearch({ version: 'v1' });", `const opts = { version: 'v1', rootUrl: '${BRIDGE}/' };`, 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
+    const ruby = ['svc = Google::Apis::CustomsearchV1::CustomSearchAPIService.new', `svc.root_url = '${BRIDGE}/'`, 'other = Google::Apis::CustomsearchV1::CustomSearchAPIService.new'].join('\n');
+    assert.deepEqual(pick(scanText('a.rb', ruby, BRIDGE)), ['repointed ruby 1', 'needs-change ruby 3']);
+  });
+
+  test('an override in a trailing comment, on a line naming Google, or given to google.options does not count', () => {
+    assert.deepEqual(pick(scanText('a.js', "const c = google.customsearch('v1'); // TODO: set rootUrl once the bridge is up", BRIDGE)), ['needs-change node-client 1']);
+    assert.deepEqual(pick(scanText('a.py', 'service = build("customsearch", "v1", developerKey=KEY)  # TODO: client_options= for the bridge', BRIDGE)), ['needs-change python-client 1']);
+    assert.deepEqual(pick(scanText('a.js', `google.options({ rootUrl: '${BRIDGE}/' });\nconst c = google.customsearch('v1');`, BRIDGE)), ['needs-change node-client 2']);
+    assert.deepEqual(pick(scanText('a.js', "const c = customsearch({ version: 'v1', rootUrl: 'https://customsearch.googleapis.com/' });", BRIDGE)), ['needs-change raw-url 1', 'needs-change node-client 1']);
+    const vertex = [
+      'opts = ClientOptions(api_endpoint=f"{LOCATION}-discoveryengine.googleapis.com")',
+      'vertex = discoveryengine.SearchServiceClient(client_options=opts)',
+      'cse = build("customsearch", "v1", developerKey=KEY)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.py', vertex, BRIDGE)), ['needs-change python-client 3']);
+    const options = ['google.options({', '  auth,', `  rootUrl: '${BRIDGE}/',`, '});', "const c = google.customsearch('v1');"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', options, BRIDGE)), ['needs-change node-client 5']);
+    const scope = `svc, _ := customsearch.NewService(ctx, option.WithEndpoint(bridge), option.WithScopes("https://www.googleapis.com/auth/cse"))`;
+    assert.deepEqual(pick(scanText('a.go', scope, BRIDGE)), ['repointed go 1']);
+  });
+
+  test("another Google client's options are not an override", () => {
+    const split = ['vertex = discoveryengine.SearchServiceClient(', '    client_options=vertex_opts,', ')', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', split, BRIDGE)), ['needs-change python-client 4']);
+    const passed = ['opts = ClientOptions(api_endpoint=VERTEX_ENDPOINT)', 'vertex = discoveryengine.SearchServiceClient(client_options=opts)', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', passed, BRIDGE)), ['needs-change python-client 3']);
+    const inline = ['de = discoveryengine.SearchServiceClient(client_options=ClientOptions(api_endpoint=DE_ENDPOINT))', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', inline, BRIDGE)), ['needs-change python-client 2']);
+    const wrapped = 'cse = build("customsearch", "v1", http=AuthorizedHttpClient(creds), client_options=opts)';
+    assert.deepEqual(pick(scanText('a.py', wrapped, BRIDGE)), ['repointed python-client 1']);
+    const drive = ['drive = build("drive", "v3", client_options=opts)', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', drive, BRIDGE)), ['needs-change python-client 2']);
+    const go = ['de, _ := discoveryengine.NewSearchClient(ctx, option.WithEndpoint(deEndpoint))', 'cse, _ := customsearch.NewService(ctx)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 2']);
+    const js = ["const drive = google.drive({ version: 'v3', rootUrl: DRIVE });", "const cse = google.customsearch('v1');"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 2']);
+    const cs = ['var sheets = new SheetsService(new BaseClientService.Initializer { BaseUri = SHEETS });', 'var cse = new CustomSearchAPIService(init);'].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 2']);
+  });
+
+  test("a sibling client's options in the same object, list or call are not an override", () => {
+    const js = ['const clients = {', "  cse: customsearch('v1'),", "  drive: google.drive({ version: 'v3', rootUrl: DRIVE }),", '};'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 2']);
+    const py = ['clients = dict(', '    cse=build("customsearch", "v1", developerKey=KEY),', '    drive=build("drive", "v3", client_options=opts),', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 2']);
+    const go = ['svcs := []any{', '\tmust(customsearch.NewService(ctx)),', '\tmust(drive.NewService(ctx, option.WithEndpoint(d))),', '}'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 2']);
+    const nested = ['service = build(', '    "customsearch", "v1",', '    client_options=ClientOptions(', '        api_endpoint=BRIDGE,', '    ),', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', nested, BRIDGE)), ['repointed python-client 2']);
+    const exported = "module.exports = { legacy: customsearch('v1'), bridged: makeClient({ rootUrl }) };";
+    assert.deepEqual(pick(scanText('a.js', exported, BRIDGE)), ['needs-change node-client 1']);
+    const twice = "const legacy = customsearch('v1'), bridged = customsearch({ rootUrl: BRIDGE });";
+    assert.deepEqual(pick(scanText('a.js', twice, BRIDGE)), ['repointed node-client 1']);
+  });
+
+  test('a keyword argument or initializer property is not a variable, so it stays with its own call', () => {
+    const py = ['search = build(', '    "customsearch", "v1",', '    client_options=opts,', ')', 'images = build("customsearch", "v1", client_options=opts)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['repointed python-client 2', 'repointed python-client 5']);
+    const cs = [
+      'var web = new CustomSearchAPIService(new BaseClientService.Initializer',
+      '{',
+      '    ApiKey = key,',
+      `    BaseUri = "${BRIDGE}/",`,
+      '});',
+      `var images = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key, BaseUri = "${BRIDGE}/" });`,
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['repointed dotnet 1', 'repointed dotnet 6']);
+  });
+
+  test('a variable used on the continuation line of a call belongs to that call', () => {
+    const py = ['legacy = build("customsearch", "v1", developerKey=KEY)', 'opts = ClientOptions(api_endpoint=BRIDGE)', 'bridged = build("customsearch", "v1",', '    developerKey=KEY, client_options=opts)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1', 'repointed python-client 3']);
+    const go = ['legacy, _ := customsearch.NewService(ctx)', 'ep := option.WithEndpoint(bridge)', 'bridged, _ := customsearch.NewService(ctx,', '\toption.WithAPIKey(key), ep)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 3']);
+  });
+
+  test('an options object that is typed or spans lines belongs to the call that uses it', () => {
+    const typed = ["const legacy = customsearch({ version: 'v1' });", 'const opts: customsearch_v1.Options = { version: \'v1\', rootUrl: BRIDGE };', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', typed, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
+    const split = ["const legacy = customsearch({ version: 'v1' });", 'const opts = {', "  version: 'v1',", '  rootUrl: BRIDGE,', '};', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', split, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 6']);
+    const oneLine = ["const legacy = customsearch('v1'); const opts = {", '  rootUrl: BRIDGE,', '};', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', oneLine, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 4']);
+  });
+
+  test("PHP's root URL is a second argument of the constructor itself, and not null", () => {
+    assert.deepEqual(pick(scanText('a.php', '$svc = new Google\\Service\\CustomSearchAPI($client, null);', BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.php', '$svc = new CustomSearchAPI($client, NULL);', BRIDGE)), ['needs-change php 1']);
+    const chained = "$results = (new Google\\Service\\CustomSearchAPI($client))->cse->listCse(['q' => $q, 'cx' => $cx]);";
+    assert.deepEqual(pick(scanText('a.php', chained, BRIDGE)), ['needs-change php 1']);
+    const nested = "$svc = new CustomSearchAPI(new Google\\Client(['developer_key' => $k, 'application_name' => 'app']));";
+    assert.deepEqual(pick(scanText('a.php', nested, BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.php', '$svc = [new CustomSearchAPI($client), new Drive($client)];', BRIDGE)), ['needs-change php 1']);
+    const built = "$svc = new CustomSearchAPI($this->makeClient($config), getenv('CSE_ROOT_URL'));";
+    assert.deepEqual(pick(scanText('a.php', built, BRIDGE)), ['repointed php 1']);
+  });
+
+  test('an options variable belongs to the call that uses it, even when other lines use it first', () => {
+    const go = [
+      'legacy, _ := customsearch.NewService(ctx)',
+      'opts := []option.ClientOption{option.WithEndpoint(bridge)}',
+      'if key != "" {',
+      '\topts = append(opts, option.WithAPIKey(key))',
+      '}',
+      'svc, err := customsearch.NewService(ctx, opts...)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 6']);
+    const js = ["const legacy = customsearch({ version: 'v1' });", 'const opts = { version: \'v1\', rootUrl: BRIDGE };', 'opts.auth = key;', 'validate(opts);', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 5']);
+    const cs = [
+      'var legacy = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key });',
+      'var init = new BaseClientService.Initializer { BaseUri = BRIDGE };',
+      'init.ApiKey = key;',
+      'var bridged = new CustomSearchAPIService(init);',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 1', 'repointed dotnet 4']);
+  });
+
+  test('an options variable set inside an if block, or spread into the call, belongs to that call', () => {
+    const go = [
+      'legacy, _ := customsearch.NewService(ctx)',
+      'var opts []option.ClientOption',
+      'if ep := os.Getenv("CSE_ROOT_URL"); ep != "" {',
+      '\topts = append(opts, option.WithEndpoint(ep))',
+      '}',
+      'svc, _ := customsearch.NewService(ctx, opts...)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 6']);
+    const literal = ['legacy, _ := customsearch.NewService(ctx)', 'opts := []option.ClientOption{', '\toption.WithEndpoint(bridge),', '}', 'svc, _ := customsearch.NewService(ctx, opts...)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', literal, BRIDGE)), ['needs-change go 1', 'repointed go 5']);
+    const typed = [
+      'function make(): customsearch_v1.Customsearch {',
+      "  const legacy = customsearch('v1');",
+      '  const opts = { rootUrl: BRIDGE };',
+      '  return customsearch(opts);',
+      '}',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', typed, BRIDGE)), ['needs-change node-client 2', 'repointed node-client 4']);
+    const spread = ["const legacy = customsearch('v1');", "const base = { version: 'v1', rootUrl: BRIDGE };", 'const web = customsearch({ ...base, auth: KEY });'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', spread, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
+    const kwargs = ['kwargs = {"developerKey": KEY, "client_options": {"api_endpoint": BRIDGE}}', 'service = build(', '    "customsearch",', '    "v1",', '    **kwargs,', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', kwargs, BRIDGE)), ['repointed python-client 3']);
+  });
+
+  test("C#'s target-typed new() before an Allman brace is an initializer, not a block", () => {
+    const cs = [
+      'var legacy = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key });',
+      'BaseClientService.Initializer init = new()',
+      '{',
+      '    ApiKey = key,',
+      '    BaseUri = BRIDGE,',
+      '};',
+      'var bridged = new CustomSearchAPIService(init);',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 1', 'repointed dotnet 7']);
+  });
+
+  test('a bracket left open in a string or regex a few lines up does not take the override', () => {
+    const tail = ['const opts = { rootUrl: BRIDGE };', 'const bridged = customsearch(opts);'];
+    const template = ["const legacy = customsearch({ version: 'v1' });", 'const msg = `searching ${q} {', '`;', ...tail].join('\n');
+    assert.deepEqual(pick(scanText('a.js', template, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 5']);
+    const regex = ["const legacy = customsearch({ version: 'v1' });", 'const OPEN = /[({]/;', ...tail].join('\n');
+    assert.deepEqual(pick(scanText('a.js', regex, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 4']);
+    const py = [
+      'legacy = build("customsearch", "v1", developerKey=KEY)',
+      '"""Search the web',
+      'through the bridge (if one is up.',
+      '"""',
+      'opts = {"api_endpoint": BRIDGE}',
+      'bridged = build("customsearch", "v1", client_options=opts)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1', 'repointed python-client 6']);
+    const langchain = ['search = GoogleSearchAPIWrapper()', '"""Calls build (see the docs', '"""', 'search.search_engine = engine'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', langchain, BRIDGE)), ['repointed langchain 1']);
+    const ruby = ['service = Google::Apis::CustomsearchV1::CustomSearchAPIService.new', 'msg = <<~TXT', '  Search (beta', 'TXT', 'service.root_url = BRIDGE'].join('\n');
+    assert.deepEqual(pick(scanText('a.rb', ruby, BRIDGE)), ['repointed ruby 1']);
+  });
+
+  test('a wrapper around the call does not hide the override inside it', () => {
+    const inline = `cse = SearchClient(build("customsearch", "v1", client_options={"api_endpoint": "${BRIDGE}"}))`;
+    assert.deepEqual(pick(scanText('a.py', inline, BRIDGE)), ['repointed python-client 1']);
+    const split = ['cse = CachedSearchClient(', '    build("customsearch", "v1",', '        client_options=opts))'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', split, BRIDGE)), ['repointed python-client 2']);
+  });
+
+  test('an import line between the override and the call does not hide the override', () => {
+    const js = ["const opts = { rootUrl: 'http://localhost:8080/' };", "const { customsearch } = require('@googleapis/customsearch');", "const c = customsearch({ version: 'v1', ...opts });"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['repointed node-client 3']);
+  });
+
+  test('the Customsearch class built directly is a call site', () => {
+    const ts = "import { customsearch_v1 } from '@googleapis/customsearch';\nconst cs = new customsearch_v1.Customsearch({ auth });";
+    assert.deepEqual(pick(scanText('a.ts', ts, BRIDGE)), ['needs-change node-client 2']);
+  });
+
+  test('an import is not a call site when the file also builds the client', () => {
+    const js = `import { customsearch } from '@googleapis/customsearch';\n${pad(20)}\nconst c = customsearch({ rootUrl: u });`;
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['repointed node-client 22']);
+  });
+
+  test('an import is reported when the construction is not one the rule recognises', () => {
+    const go = `import "google.golang.org/api/customsearch/v1"\n${pad(10)}\nsvc := build(ctx)`;
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1']);
+  });
+
+  test('comment lines are neither call sites nor overrides', () => {
+    const java = [
+      '// cs = new CustomSearchAPI.Builder(t, j, null).build();',
+      'cs = new CustomSearchAPI.Builder(t, j, null)',
+      '    // .setRootUrl("http://localhost:8080/")',
+      '    .build();',
+      '/* new CustomSearchAPI.Builder(', ' * new CustomSearchAPI.Builder(', ' */',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.java', java, BRIDGE)), ['needs-change java 2']);
+    assert.deepEqual(scanText('a.py', '# service = build("customsearch", "v1")', BRIDGE), []);
+    assert.deepEqual(scanText('a.html', '<!-- <script src="https://cse.google.com/cse.js"></script> -->', BRIDGE), []);
+  });
+
+  test('a JavaScript private field is code, not a comment', () => {
+    const ts = "class Search {\n  #cs = customsearch({ version: 'v1' });\n}";
+    assert.deepEqual(pick(scanText('search.ts', ts, BRIDGE)), ['needs-change node-client 2']);
+  });
+
+  test('code after a closed block comment, a PHP attribute and a leading * that is not a comment are code', () => {
+    assert.deepEqual(pick(scanText('a.js', "/** @type {X} */ const cs = customsearch({ version: 'v1' });", BRIDGE)), ['needs-change node-client 1']);
+    assert.deepEqual(pick(scanText('a.php', '/** @var X */ $svc = new \\Google\\Service\\CustomSearchAPI($client);', BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.php', '#[Pure] public function svc() { return new CustomSearchAPI($c); }', BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.js', "*pages() { yield customsearch({ version: 'v1' }); }", BRIDGE)), ['needs-change node-client 1']);
+    assert.deepEqual(pick(scanText('a.go', '*svc, _ = customsearch.NewService(ctx)', BRIDGE)), ['needs-change go 1']);
+    assert.deepEqual(scanText('a.js', "/* customsearch({ version: 'v1' }) */", BRIDGE), []);
+    assert.deepEqual(scanText('a.php', "# new CustomSearchAPI($c);", BRIDGE), []);
+  });
+
+  test('a # is a comment only where the language says so: not C #define, not Ruby #{', () => {
+    assert.deepEqual(pick(scanText('api.h', '#define CSE_URL "https://www.googleapis.com/customsearch/v1"', BRIDGE)), ['needs-change raw-url 1']);
+    assert.deepEqual(pick(scanText('a.rb', 'url = <<~U\n  #{base}https://www.googleapis.com/customsearch/v1?key=#{k}\nU', BRIDGE)), ['needs-change raw-url 2']);
+    assert.deepEqual(scanText('a.sh', '# curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
+    assert.deepEqual(scanText('a.py', '#service = build("customsearch", "v1")', BRIDGE), []);
+    assert.deepEqual(scanText('.env.example', '#CSE_URL=https://www.googleapis.com/customsearch/v1', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '#curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
+    assert.deepEqual(scanText('a.md', '```\n#service = build("customsearch", "v1")\n```', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '# if you need it: curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '# include the key: https://www.googleapis.com/customsearch/v1?key=K', BRIDGE), []);
+  });
+
+  test('clients built in less usual ways are found', () => {
+    assert.deepEqual(pick(scanText('a.py', 'tools = load_tools(["google-search", "llm-math"], llm=llm)', BRIDGE)), ['needs-change langchain 1']);
+    assert.deepEqual(pick(scanText('A.java', 'Customsearch cs = new Customsearch(new NetHttpTransport(), new GsonFactory(), null);', BRIDGE)), ['needs-change java 1']);
+    assert.deepEqual(pick(scanText('A.cs', 'var search = new GoogleTextSearch(searchEngineId: cx, apiKey: key);', BRIDGE)), ['needs-change dotnet 1']);
+    assert.deepEqual(pick(scanText('A.cs', 'using Google.Apis.CustomSearchAPI.v1;', BRIDGE)), ['needs-change dotnet 1']);
+  });
+
+  test("a function of the project's own named customsearch is not a call site", () => {
+    assert.deepEqual(scanText('a.js', 'async function customsearch(q) {\n  return fetch(`${BASE}/search?q=${q}`);\n}', BRIDGE), []);
+  });
+
+  test("the widget's JSON endpoint is out of scope, not a URL to swap", () => {
+    const js = "fetch('https://www.googleapis.com/customsearch/v1element?key=' + k + '&cx=' + cx);";
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['out-of-scope widget 1']);
+  });
+
+  test('a notebook is read cell line by cell line, so its comments and split calls read as code does', () => {
+    const cell = (lines: string[]) => JSON.stringify({ cells: [{ cell_type: 'code', source: lines }] }, null, 1);
+    const split = cell(['service = build(\n', '    "customsearch",\n', '    "v1",\n', '    developerKey=KEY)\n']);
+    assert.deepEqual(pick(scanText('a.ipynb', split, BRIDGE)), ['needs-change python-client 7']);
+    assert.equal(scanText('a.ipynb', split, BRIDGE)[0]!.snippet, '"customsearch",');
+    assert.deepEqual(pick(scanText('a.ipynb', cell(['\n', '\n', 'service = build("customsearch", "v1")\n']), BRIDGE)), ['needs-change python-client 8']);
+    assert.deepEqual(scanText('a.ipynb', cell(['# service = build("customsearch", "v1")\n']), BRIDGE), []);
+    const bridged = cell(['service = build("customsearch", "v1",\n', `    client_options={"api_endpoint": "${BRIDGE}"})\n`]);
+    assert.deepEqual(pick(scanText('a.ipynb', bridged, BRIDGE)), ['repointed python-client 6']);
+  });
+
+  test('a class statement named GoogleSearchAPIWrapper is not a call site', () => {
+    const py = 'class GoogleSearchAPIWrapper(BaseModel):\n    pass\n\n\n\n\n\n\nsearch = GoogleSearchAPIWrapper()';
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change langchain 9']);
+    assert.deepEqual(scanText('a.py', 'class GoogleSearchAPIWrapper(BaseModel):\n    siterestrict: bool = False', BRIDGE), []);
+    const imported = 'from langchain_community.utilities import (\n    GoogleSearchAPIWrapper,\n)';
+    assert.deepEqual(pick(scanText('a.py', imported, BRIDGE)), ['needs-change langchain 2']);
+  });
+
+  test("TypeScript's CommonJS output of a customsearch() call is found", () => {
+    const js = 'const customsearch_1 = require("@googleapis/customsearch");\nconst client = (0, customsearch_1.customsearch)("v1");';
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 2']);
+  });
+
+  test('the LangChain override has to be an assignment after construction', () => {
+    const py = 'search = GoogleSearchAPIWrapper(search_engine=engine)';
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change langchain 1']);
+  });
+
+  test('importing ClientOptions is not an override', () => {
+    const py = 'from google.api_core.client_options import ClientOptions\nservice = build("customsearch", "v1")';
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 2']);
+  });
+
+  test('a build( call split one argument per line is found on its "customsearch" line', () => {
+    const py = 'service = build(\n    "customsearch",\n    "v1",\n    client_options=ClientOptions(api_endpoint=URL),\n)';
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['repointed python-client 2']);
+  });
+});
+
+describe('what gets scanned', () => {
+  test('client rules only run on their own language', () => {
+    const java = 'import com.google.api.services.customsearch.v1.CustomSearchAPI;\nvar cs = new CustomSearchAPI.Builder(t, j, null).build();';
+    assert.deepEqual(pick(scanText('Search.java', java, BRIDGE)), ['needs-change java 2']);
+    assert.deepEqual(scanText('notes.txt', 'service = build("customsearch", "v1")', BRIDGE), []);
+    assert.deepEqual(scanText('search.py', "const c = customsearch({ version: 'v1' });", BRIDGE), []);
+  });
+
+  test('raw URLs and the widget are found in any text file', () => {
+    assert.deepEqual(pick(scanText('config.yaml', 'endpoint: https://www.googleapis.com/customsearch/v1', BRIDGE)), ['needs-change raw-url 1']);
+    assert.deepEqual(pick(scanText('layout.erb', '<script src="https://www.google.com/cse/cse.js?cx=x"></script>', BRIDGE)), ['out-of-scope widget 1']);
+  });
+
+  test('the url.template every response carries is not a call site', () => {
+    const json = '"template": "https://www.googleapis.com/customsearch/v1?q={searchTerms}&num={count?}&start={startIndex?}&cx={cx?}"';
+    assert.deepEqual(scanText('recorded.json', json, BRIDGE), []);
+  });
+
+  test('Markdown: only fenced code, with the fence tag as the language and real line numbers', () => {
+    const md = [
+      '# Migrating', // 1
+      '', // 2
+      'We used GoogleSearchAPIWrapper and build("customsearch", "v1") before.', // 3
+      '', // 4
+      '```python', // 5
+      'service = build("customsearch", "v1")', // 6
+      '```', // 7
+      '', // 8
+      '```', // 9
+      'service = build("customsearch", "v1", client_options=opts)', // 10
+      '```', // 11
+      '', // 12
+      '```bash', // 13
+      'service = build("customsearch", "v1")', // 14
+      "curl 'https://www.googleapis.com/customsearch/v1?q=x'", // 15
+      '```', // 16
+      '', // 17
+      '1. In a list:', // 18
+      '', // 19
+      '    ~~~js', // 20
+      "    const c = customsearch({ version: 'v1' });", // 21
+      '    ~~~', // 22
+    ].join('\n');
+    assert.deepEqual(pick(scanText('README.md', md, BRIDGE)), [
+      'needs-change python-client 6',
+      'repointed python-client 10',
+      'needs-change raw-url 15',
+      'needs-change node-client 21',
+    ]);
+  });
+
+  test('a fence with an info string does not close a block, and a longer fence needs a longer close', () => {
+    const md = ['```', '```python', 'service = build("customsearch", "v1")', '```', '````md', '```', "curl 'https://www.googleapis.com/customsearch/v1?q=x'", '````'].join('\n');
+    assert.deepEqual(pick(scanText('a.md', md, BRIDGE)), ['needs-change python-client 3', 'needs-change raw-url 7']);
+  });
+
+  test('a fence opener cannot have a backtick after it, so inline code at the start of a line is prose', () => {
+    const md = ['```customsearch``` is the API.', "See https://www.googleapis.com/customsearch/v1 in prose.", '```js', "const c = customsearch({ version: 'v1' });", '```'].join('\n');
+    assert.deepEqual(pick(scanText('a.md', md, BRIDGE)), ['needs-change node-client 4']);
+  });
+
+  test('each code block is its own unit, so an override in the next block does not count', () => {
+    const md = '```python\nservice = build("customsearch", "v1")\n```\n\n```python\nclient_options=ClientOptions(api_endpoint=URL)\n```';
+    assert.deepEqual(pick(scanText('a.md', md, BRIDGE)), ['needs-change python-client 2']);
+  });
+
+  test('CRLF files report the same line numbers', () => {
+    const lines = ['# header', '', 'import os', 'service = build("customsearch", "v1")', '', "u = 'https://www.googleapis.com/customsearch/v1'"];
+    const lf = scanText('a.py', lines.join('\n'), BRIDGE);
+    const crlf = scanText('a.py', lines.join('\r\n'), BRIDGE);
+    assert.deepEqual(pick(crlf), ['needs-change python-client 4', 'needs-change raw-url 6']);
+    assert.deepEqual(crlf, lf, 'no stray \\r in snippets either');
+  });
+
+  test('a line matching two rules reports each rule once, and a rule matching twice reports once', () => {
+    const py = `r = build("customsearch", "v1"); u = "https://www.googleapis.com/customsearch/v1" + "https://customsearch.googleapis.com/"`;
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change raw-url 1', 'needs-change python-client 1']);
+  });
+
+  test('a notebook cell is scanned through its JSON escaping', () => {
+    const cell = '    "service = build(\\"customsearch\\", \\"v1\\", developerKey=KEY)\\n",';
+    assert.deepEqual(pick(scanText('explore.ipynb', cell, BRIDGE)), ['needs-change python-client 1']);
+    const notebook = (source: string | string[]) => ({ cells: [{ cell_type: 'code', source }] });
+    const minified = JSON.stringify(notebook(['service = build("customsearch", "v1", developerKey=KEY)\n']));
+    assert.deepEqual(pick(scanText('explore.ipynb', minified, BRIDGE)), ['needs-change python-client 1']);
+    const oneString = JSON.stringify(notebook('import os\nservice = build("customsearch", "v1", developerKey=KEY)\n'), null, 1);
+    assert.deepEqual(pick(scanText('explore.ipynb', oneString, BRIDGE)), ['needs-change python-client 5']);
+  });
+
+  test('a notebook line is numbered where its own cell has it, not where a Markdown cell or output repeats it', () => {
+    const line = 'service = build("customsearch", "v1")\n';
+    const pretty = (cells: object[]) => JSON.stringify({ cells, metadata: {}, nbformat: 4 }, null, 1);
+    const at = (text: string) => text.split('\n').findLastIndex((l) => l.includes('build(')) + 1;
+    const quoted = pretty([{ cell_type: 'markdown', source: ['Run this:\n', line] }, { cell_type: 'code', outputs: [], source: [line] }]);
+    assert.deepEqual(pick(scanText('a.ipynb', quoted, BRIDGE)), [`needs-change python-client ${at(quoted)}`]);
+    // Jupyter sorts the keys, so a cell's outputs come before its source.
+    const output = pretty([{ cell_type: 'code', outputs: [{ output_type: 'stream', text: [line] }], source: [line] }]);
+    assert.deepEqual(pick(scanText('a.ipynb', output, BRIDGE)), [`needs-change python-client ${at(output)}`]);
+    // Python's json.dump writes é for é.
+    const ascii = pretty([{ cell_type: 'code', outputs: [], source: ['q = "café"\n', `q = "café"; ${line}`] }]).replaceAll('é', '\\u00e9');
+    assert.deepEqual(pick(scanText('a.ipynb', ascii, BRIDGE)), [`needs-change python-client ${at(ascii)}`]);
+    // nbformat 3, whose Markdown and outputs are left out too.
+    const v3 = JSON.stringify({ nbformat: 3, worksheets: [{ cells: [
+      { cell_type: 'markdown', source: ['We used to call https://www.googleapis.com/customsearch/v1\n'] },
+      { cell_type: 'code', input: [line], outputs: [{ output_type: 'stream', text: ['GET https://www.googleapis.com/customsearch/v1?q=x\n'] }] },
+    ] }] }, null, 1);
+    assert.deepEqual(pick(scanText('a.ipynb', v3, BRIDGE)), [`needs-change python-client ${at(v3)}`]);
+  });
+
+  test('a minified notebook is read cell by cell, code cells only', () => {
+    const cells = (...cells: [string, string[]][]) => JSON.stringify({ cells: cells.map(([cell_type, source]) => ({ cell_type, source, outputs: [] })) });
+    const commented = cells(['code', ['# service = build("customsearch", "v1")\n', 'x = 1  # TODO: client_options=\n']]);
+    assert.deepEqual(scanText('a.ipynb', commented, BRIDGE), []);
+    const todo = cells(['code', ['service = build("customsearch", "v1")  # TODO: client_options=\n']]);
+    assert.deepEqual(pick(scanText('a.ipynb', todo, BRIDGE)), ['needs-change python-client 1']);
+    const vertex = cells(['code', ['vertex = discoveryengine.SearchServiceClient(client_options=opts)\n']], ['code', ['cse = build("customsearch", "v1")\n']]);
+    assert.deepEqual(pick(scanText('a.ipynb', vertex, BRIDGE)), ['needs-change python-client 1']);
+    const prose = cells(['markdown', ['We call https://www.googleapis.com/customsearch/v1 with build("customsearch", "v1").\n']]);
+    assert.deepEqual(scanText('a.ipynb', prose, BRIDGE), []);
+  });
+
+  test('a raw URL on a line that also names the bridge is skipped, but not for a URL the bridge URL merely starts', () => {
+    const google = 'https://www.googleapis.com/customsearch/v1';
+    assert.deepEqual(scanText('a.js', `const u = '${google}'.replace('https://www.googleapis.com', '${BRIDGE}');`, BRIDGE), []);
+    assert.deepEqual(pick(scanText('a.js', `fetch('${google}'); dev = 'http://localhost:3000';`, 'http://localhost')), ['needs-change raw-url 1']);
+    assert.deepEqual(pick(scanText('a.js', `fetch('${google}'); old = 'http://bridge.old/';`, 'http://bridge')), ['needs-change raw-url 1']);
+  });
+
+  test('a long line is cut in the snippet', () => {
+    const [f] = scanText('bundle.js', `${'a'.repeat(500)}https://www.googleapis.com/customsearch/v1`, BRIDGE);
+    assert.equal(f!.snippet.length, 203);
+    assert.ok(f!.snippet.endsWith('...'));
+  });
+});
+
+describe('walking the tree', () => {
+  const hit = "curl 'https://www.googleapis.com/customsearch/v1?q=x'\n";
+
+  test('skips dependency and build directories at any depth', (t) => {
+    const files: Record<string, string> = { 'src/search.sh': hit };
+    for (const name of SKIP_DIRS) {
+      files[`${name}/search.sh`] = hit;
+      files[`pkg/${name}/deep/search.sh`] = hit;
+    }
+    const dir = tree(t, files);
+    const { code, stdout } = run(['--json'], dir);
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(stdout).findings.map((f: Finding) => f.file), ['src/search.sh']);
+  });
+
+  test('skips a virtualenv whatever it is called', (t) => {
+    const dir = tree(t, { 'app.sh': hit, 'env/pyvenv.cfg': 'home = /usr/bin\n', 'env/lib/search.sh': hit });
+    assert.deepEqual(JSON.parse(run(['--json'], dir).stdout).findings.map((f: Finding) => f.file), ['app.sh']);
+    assert.match(run(['env'], dir).stdout, /lib\/search\.sh:1/);
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir }).status, 0);
+    assert.deepEqual(JSON.parse(run(['--json'], dir).stdout).findings.map((f: Finding) => f.file), ['app.sh'], 'untracked in a git repo too');
+  });
+
+  test('a directory named on the command line is scanned even if it has a skipped name', (t) => {
+    const dir = tree(t, { 'build/search.sh': hit });
+    assert.match(run(['build'], dir).stdout, /^needs-change {2}raw-url {8}search\.sh:1$/m);
+  });
+
+  test('in a git repository, files .gitignore excludes are skipped unless their directory is named', (t) => {
+    const dir = tree(t, {
+      '.gitignore': 'env/\n*.log\n',
+      'app/search.sh': hit,
+      'app/debug.log': hit,
+      'untracked.sh': hit,
+      'env/googleapiclient/customsearch.v1.json': '"rootUrl": "https://customsearch.googleapis.com/"',
+      'scan.log': hit,
+      'outer/inner/.gitignore': 'out/\n',
+      'outer/inner/out/bundle.js': hit,
+      'outer/inner/src.sh': hit,
+    });
+    const git = (cwd: string, ...args: string[]) => assert.equal(spawnSync('git', args, { cwd }).status, 0);
+    git(dir, 'init', '-q');
+    git(dir, 'add', 'app', '.gitignore');
+    git(join(dir, 'outer', 'inner'), 'init', '-q');
+    const files = (...args: string[]) => JSON.parse(run(['--json', ...args], dir).stdout).findings.map((f: Finding) => f.file);
+    assert.deepEqual(files(), ['app/search.sh', 'outer/inner/src.sh', 'untracked.sh'], 'a nested repository has its own .gitignore');
+    assert.deepEqual(files('env'), ['googleapiclient/customsearch.v1.json']);
+    assert.deepEqual(files('app'), ['search.sh']);
+  });
+
+  test('skips binary files, and files over 2 MB with a warning for source', (t) => {
+    const nulEarly = Buffer.concat([Buffer.from(hit), Buffer.from([0])]);
+    const nulLate = Buffer.concat([Buffer.from(hit), Buffer.alloc(8 * 1024, 0x20), Buffer.from([0])]);
+    const huge = hit + ' '.repeat(MAX_FILE_BYTES);
+    const dir = tree(t, { 'a.sh': nulEarly, 'b.sh': nulLate, 'c.sh': huge, 'c.js': huge, 'd.sh': hit });
+    const { stdout, stderr } = run(['--json'], dir);
+    const report = JSON.parse(stdout);
+    assert.deepEqual(report.findings.map((f: Finding) => f.file), ['b.sh', 'd.sh'], 'a NUL past the first 8 KB does not make a file binary');
+    assert.equal(report.summary.filesScanned, 2);
+    assert.equal(stderr, `warning: ${join(dir, 'c.js')}: skipped, over 2 MB\n`, 'a big script is worth a warning, and big data is not');
+  });
+
+  test('reads UTF-16 files that start with a byte order mark', (t) => {
+    const py = 'service = build("customsearch", "v1")\n';
+    const be = Buffer.from(`﻿${py}`, 'utf16le').swap16();
+    const dir = tree(t, { 'le.py': Buffer.from(`﻿${py}`, 'utf16le'), 'be.py': be });
+    const report = JSON.parse(run(['--json'], dir).stdout);
+    assert.deepEqual(report.findings.map((f: Finding) => `${f.file} ${f.status} ${f.line}`), ['be.py needs-change 1', 'le.py needs-change 1']);
+  });
+
+  test('a Markdown example that builds a client does not hide an import the rules cannot follow further', (t) => {
+    const dir = tree(t, {
+      'README.md': '```go\nsvc, _ := customsearch.NewService(ctx, option.WithEndpoint("http://localhost:8080/"))\n```\n',
+      'cmd/main.go': 'import cs "google.golang.org/api/customsearch/v1"\n\nsvc, err := cs.NewService(ctx, option.WithAPIKey(key))\n',
+    });
+    const report = JSON.parse(run(['--json'], dir).stdout);
+    assert.deepEqual(report.findings.map((f: Finding) => `${f.status} ${f.file}:${f.line}`), ['repointed README.md:2', 'needs-change cmd/main.go:1']);
+  });
+
+  test("a Markdown import block is answered by the Markdown block that builds the client", () => {
+    const md = "```js\nimport { customsearch } from '@googleapis/customsearch';\n```\n\nThen:\n\n```js\nconst c = customsearch({ version: 'v1' });\n```\n";
+    assert.deepEqual(pick(scanText('README.md', md, BRIDGE)), ['needs-change node-client 8']);
+  });
+
+  test('does not loop on a symlink cycle', (t) => {
+    const dir = tree(t, { 'src/search.sh': hit });
+    // A junction needs no privileges on Windows and is a plain symlink elsewhere.
+    symlinkSync(dir, join(dir, 'src', 'loop'), 'junction');
+    const report = JSON.parse(run(['--json'], dir).stdout);
+    assert.deepEqual(report.findings.map((f: Finding) => f.file), ['src/search.sh']);
+  });
+
+  test('paths are relative to the root, with forward slashes', (t) => {
+    const dir = tree(t, { 'a/b/c/search.sh': hit });
+    const report = JSON.parse(run(['--json', 'a'], dir).stdout);
+    assert.equal(report.root, slashed(join(dir, 'a')));
+    assert.equal(report.findings[0].file, 'b/c/search.sh');
+  });
+
+  test('a single file is reported relative to its own directory; several paths relative to the cwd', (t) => {
+    const dir = tree(t, { 'a/search.sh': hit, 'b/search.sh': hit });
+    assert.equal(JSON.parse(run(['--json', 'a/search.sh'], dir).stdout).findings[0].file, 'search.sh');
+    const both = JSON.parse(run(['--json', 'a', 'b', 'a/search.sh'], dir).stdout);
+    assert.equal(both.root, slashed(dir));
+    assert.deepEqual(both.findings.map((f: Finding) => f.file), ['a/search.sh', 'b/search.sh'], 'a file named twice is scanned once');
+  });
+
+  test('imports stand in for a call site only when no file in the scan builds the client', (t) => {
+    const types = 'package search\n\nimport "google.golang.org/api/customsearch/v1"\n\nfunc q(r *customsearch.Search) {}';
+    const built = 'package search\n\nfunc New() { svc, _ := customsearch.NewService(ctx) }';
+    const both = tree(t, { 'types.go': types, 'client.go': built });
+    assert.deepEqual(JSON.parse(run(['--json'], both).stdout).findings.map((f: Finding) => `${f.file}:${f.line}`), ['client.go:3']);
+    const alone = tree(t, { 'types.go': types });
+    assert.deepEqual(JSON.parse(run(['--json'], alone).stdout).findings.map((f: Finding) => `${f.file}:${f.line}`), ['types.go:3']);
+  });
+
+  test('an empty tree reports 0 call sites and exits 0', (t) => {
+    const dir = tree(t, {});
+    const { code, stdout } = run([], dir);
+    assert.equal(code, 0);
+    assert.equal(stdout, '0 call sites: 0 need a change, 0 already repointed, 0 out of scope\n');
+  });
+});
+
+describe('runScan', () => {
+  test('the fixture directory lists every rule', () => {
+    const { code, stdout } = run([]);
+    assert.equal(code, 1);
+    for (const rule of RULES) assert.match(stdout, new RegExp(`  ${rule.id} `), rule.id);
+    assert.match(stdout, /^21 call sites: 11 need a change, 9 already repointed, 1 out of scope$/m);
+  });
+
+  test('the worked example: text output and summary', (t) => {
+    const app = [
+      '"""Search helpers."""',
+      'import os',
+      '',
+      'from google.api_core.client_options import ClientOptions',
+      'from googleapiclient.discovery import build',
+      '',
+      'KEY = os.environ["CSE_KEY"]',
+      'RAW = "https://www.googleapis.com/customsearch/v1"',
+      '',
+      '',
+      'def legacy():',
+      '    service = build("customsearch", "v1", developerKey=KEY)',
+      '    return service',
+      '',
+      '',
+      '',
+      '',
+      'def bridged():',
+      '    return build("customsearch", "v1", developerKey=KEY,',
+      '                 client_options=ClientOptions(api_endpoint="http://localhost:8080"))',
+    ].join('\n');
+    const dir = tree(t, { 'app.py': app });
+    const { code, stdout } = run([], dir);
+    assert.equal(code, 1);
+    assert.equal(
+      stdout,
+      [
+        'needs-change  raw-url        app.py:8',
+        '    swap the host: http://localhost:8080/customsearch/v1',
+        'needs-change  python-client  app.py:12',
+        '    client_options=ClientOptions(api_endpoint="http://localhost:8080")',
+        'repointed     python-client  app.py:19',
+        '',
+        '3 call sites: 2 need a change, 1 already repointed, 0 out of scope',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  test('--json prints the documented shape and parses', () => {
+    const { code, stdout } = run(['--json']);
+    assert.equal(code, 1);
+    const report = JSON.parse(stdout);
+    assert.deepEqual(Object.keys(report), ['version', 'root', 'findings', 'summary']);
+    assert.equal(report.version, pkg.version);
+    assert.equal(report.root, slashed(fixtures));
+    assert.deepEqual(Object.keys(report.findings[0]), ['rule', 'lang', 'file', 'line', 'status', 'snippet', 'fix']);
+    assert.deepEqual(report.summary, { callSites: 21, needsChange: 11, repointed: 9, outOfScope: 1, filesScanned: 11 });
+    const py = report.findings.find((f: Finding) => f.file === 'search.py' && f.status === 'needs-change');
+    assert.deepEqual(py, {
+      rule: 'python-client',
+      lang: 'python',
+      file: 'search.py',
+      line: 6,
+      status: 'needs-change',
+      snippet: 'service = build("customsearch", "v1", developerKey=KEY)',
+      fix: 'client_options=ClientOptions(api_endpoint="http://localhost:8080")',
+    });
+  });
+
+  test('exit 0 when everything is repointed, and for out-of-scope findings alone', (t) => {
+    const dir = tree(t, {
+      'ok.js': `const c = customsearch({ version: 'v1', rootUrl: '${BRIDGE}/' });`,
+      'page.html': '<script src="https://cse.google.com/cse.js?cx=x"></script>',
+    });
+    const { code, stdout } = run([], dir);
+    assert.equal(code, 0);
+    assert.match(stdout, /^2 call sites: 0 need a change, 1 already repointed, 1 out of scope$/m);
+  });
+
+  test('exit 1 with one call site uses the singular', (t) => {
+    const dir = tree(t, { 'a.sh': "curl 'https://www.googleapis.com/customsearch/v1'" });
+    const { code, stdout } = run([], dir);
+    assert.equal(code, 1);
+    assert.match(stdout, /^1 call site: 1 needs a change, 0 already repointed, 0 out of scope$/m);
+  });
+
+  test('exit 2 for bad arguments and a missing path, with a clear message', () => {
+    const cases: Array<[string[], RegExp]> = [
+      [['--bogus'], /^cse-bridge scan: Unknown option '--bogus'.*\nusage: cse-bridge scan/],
+      [['--json=1'], /Option '--json' does not take an argument/],
+      [['--bridge-url'], /Option '--bridge-url <value>' argument missing/],
+      [['--bridge-url', '--json'], /Option '--bridge-url' argument is ambiguous\.\n.*\n.*use '--bridge-url=-XYZ'\.\nusage:/],
+      [['--bridge-url='], /--bridge-url needs a URL/],
+      [['--bridge-url', 'localhost:8080'], /--bridge-url must use http:\/\/ or https:\/\//],
+      [['--bridge-url=not a url'], /--bridge-url must be an absolute http\(s\) URL/],
+      [['no-such-dir'], /^cse-bridge scan: no-such-dir: no such file or directory\n$/],
+    ];
+    for (const [argv, message] of cases) {
+      const { code, stdout, stderr } = run(argv);
+      assert.equal(code, 2, argv.join(' '));
+      assert.equal(stdout, '', argv.join(' '));
+      assert.match(stderr, message, argv.join(' '));
+    }
+  });
+
+  test('--bridge-url with trailing slashes: one slash on rootUrl, none on api_endpoint', () => {
+    for (const url of ['https://search.example.com:9000/', 'https://search.example.com:9000///', 'https://search.example.com:9000']) {
+      const report = JSON.parse(run(['--json', `--bridge-url=${url}`]).stdout);
+      const fix = (rule: string) => report.findings.find((f: Finding) => f.rule === rule).fix;
+      assert.equal(fix('node-client'), `rootUrl: 'https://search.example.com:9000/'`, url);
+      assert.equal(fix('python-client'), 'client_options=ClientOptions(api_endpoint="https://search.example.com:9000")', url);
+      assert.equal(fix('raw-url'), 'swap the host: https://search.example.com:9000/customsearch/v1', url);
+    }
+  });
+
+  test('-- ends the options, so a path can start with a dash', (t) => {
+    const dir = tree(t, { '-old/a.sh': "curl 'https://www.googleapis.com/customsearch/v1'" });
+    const { code, stdout } = run(['--json', '--', '-old'], dir);
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(stdout).findings.map((f: Finding) => f.file), ['a.sh']);
+  });
+
+  test('a raw URL on a line that already names the custom bridge URL is skipped', (t) => {
+    const dir = tree(t, { 'a.js': "const u = process.env.CSE || 'https://www.googleapis.com/customsearch/v1'; // was, now https://bridge.lan" });
+    assert.equal(run(['--bridge-url', 'https://bridge.lan/'], dir).code, 0);
+    assert.equal(run([], dir).code, 1);
+  });
+});
+
+describe('the cse-bridge bin', () => {
+  let bin: string;
+  let dir: string;
+
+  // CI's test job does not build, so the bin under test gets its own dist next to it.
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cse-scan-bin-'));
+    mkdirSync(join(dir, 'bin'));
+    copyFileSync(join(repo, 'bin', 'cse-bridge.js'), join(dir, 'bin', 'cse-bridge.js'));
+    copyFileSync(join(repo, 'package.json'), join(dir, 'package.json'));
+    const tsc = spawnSync(process.execPath, [join(repo, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(repo, 'tsconfig.json'), '--outDir', join(dir, 'dist')], { encoding: 'utf8' });
+    assert.equal(tsc.status, 0, tsc.stdout + tsc.stderr);
+    bin = join(dir, 'bin', 'cse-bridge.js');
+  });
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const cli = (...argv: string[]) => spawnSync(process.execPath, [bin, ...argv], { cwd: fixtures, encoding: 'utf8' });
+
+  test('scan --help prints the help, scan included', () => {
+    const r = cli('scan', '--help');
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /cse-bridge scan \[path\.\.\.\] \[--json\] \[--bridge-url URL\]/);
+  });
+
+  test('scan with an unknown flag exits 2', () => {
+    const r = cli('scan', '--bogus');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cse-bridge scan: Unknown option '--bogus'/);
+  });
+
+  test('scan runs end to end and exits 1 on the fixtures', () => {
+    const r = cli('scan', '--json');
+    assert.equal(r.status, 1, r.stderr);
+    assert.equal(JSON.parse(r.stdout).summary.callSites, 21);
+  });
+
+  test('import still dispatches', () => {
+    const r = cli('import');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cse-bridge import: no annotations file given/);
+  });
+});

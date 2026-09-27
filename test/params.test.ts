@@ -107,8 +107,9 @@ describe('start', () => {
     assert.equal(expectApiError('q=a&cx=c&start=101').code, 400);
   });
 
-  test('start below 1 is rejected', () => {
-    assert.equal(expectApiError('q=a&cx=c&start=0').code, 400);
+  test('start 0 is the first page, as Semantic Kernel sends it, and below that is rejected', () => {
+    assert.equal(parse('q=a&cx=c&start=0').start, 1);
+    assert.equal(expectApiError('q=a&cx=c&start=-1').code, 400);
   });
 
   test('the classic 1/11/21 loop is accepted', () => {

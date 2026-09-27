@@ -221,7 +221,8 @@ describe('cse-bridge import', () => {
     assert.equal(run(['annotations.xml', '--cx', 'x', '--frob']).code, 2);
     const swallowed = run(['annotations.xml', '--cx', '--write']);
     assert.equal(swallowed.code, 2, '--write is not taken as the cx name');
-    assert.match(swallowed.stderr, /--cx NAME is required/);
+    assert.match(swallowed.stderr, /Option '--cx' argument is ambiguous/);
+    assert.match(run(['annotations.xml', '--cx=']).stderr, /--cx NAME is required/);
     assert.equal(swallowed.stdout, '');
     assert.equal(run(['annotations.xml', '--cx', 'a"b']).code, 2);
     const missing = run(['nope.xml', '--cx=x']);
