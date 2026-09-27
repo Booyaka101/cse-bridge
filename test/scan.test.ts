@@ -240,6 +240,14 @@ describe('proximity', () => {
     assert.deepEqual(pick(scanText('a.py', inline, BRIDGE)), ['needs-change python-client 2']);
     const wrapped = 'cse = build("customsearch", "v1", http=AuthorizedHttpClient(creds), client_options=opts)';
     assert.deepEqual(pick(scanText('a.py', wrapped, BRIDGE)), ['repointed python-client 1']);
+    const drive = ['drive = build("drive", "v3", client_options=opts)', 'cse = build("customsearch", "v1", developerKey=KEY)'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', drive, BRIDGE)), ['needs-change python-client 2']);
+    const go = ['de, _ := discoveryengine.NewSearchClient(ctx, option.WithEndpoint(deEndpoint))', 'cse, _ := customsearch.NewService(ctx)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 2']);
+    const js = ["const drive = google.drive({ version: 'v3', rootUrl: DRIVE });", "const cse = google.customsearch('v1');"].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 2']);
+    const cs = ['var sheets = new SheetsService(new BaseClientService.Initializer { BaseUri = SHEETS });', 'var cse = new CustomSearchAPIService(init);'].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 2']);
   });
 
   test('a keyword argument or initializer property is not a variable, so it stays with its own call', () => {
@@ -270,8 +278,100 @@ describe('proximity', () => {
     assert.deepEqual(pick(scanText('a.ts', split, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 6']);
   });
 
-  test("PHP's root URL argument has to be something other than null", () => {
+  test("PHP's root URL is a second argument of the constructor itself, and not null", () => {
     assert.deepEqual(pick(scanText('a.php', '$svc = new Google\\Service\\CustomSearchAPI($client, null);', BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.php', '$svc = new CustomSearchAPI($client, NULL);', BRIDGE)), ['needs-change php 1']);
+    const chained = "$results = (new Google\\Service\\CustomSearchAPI($client))->cse->listCse(['q' => $q, 'cx' => $cx]);";
+    assert.deepEqual(pick(scanText('a.php', chained, BRIDGE)), ['needs-change php 1']);
+    const nested = "$svc = new CustomSearchAPI(new Google\\Client(['developer_key' => $k, 'application_name' => 'app']));";
+    assert.deepEqual(pick(scanText('a.php', nested, BRIDGE)), ['needs-change php 1']);
+    assert.deepEqual(pick(scanText('a.php', '$svc = [new CustomSearchAPI($client), new Drive($client)];', BRIDGE)), ['needs-change php 1']);
+    const built = "$svc = new CustomSearchAPI($this->makeClient($config), getenv('CSE_ROOT_URL'));";
+    assert.deepEqual(pick(scanText('a.php', built, BRIDGE)), ['repointed php 1']);
+  });
+
+  test('an options variable belongs to the call that uses it, even when other lines use it first', () => {
+    const go = [
+      'legacy, _ := customsearch.NewService(ctx)',
+      'opts := []option.ClientOption{option.WithEndpoint(bridge)}',
+      'if key != "" {',
+      '\topts = append(opts, option.WithAPIKey(key))',
+      '}',
+      'svc, err := customsearch.NewService(ctx, opts...)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 6']);
+    const js = ["const legacy = customsearch({ version: 'v1' });", 'const opts = { version: \'v1\', rootUrl: BRIDGE };', 'opts.auth = key;', 'validate(opts);', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 5']);
+    const cs = [
+      'var legacy = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key });',
+      'var init = new BaseClientService.Initializer { BaseUri = BRIDGE };',
+      'init.ApiKey = key;',
+      'var bridged = new CustomSearchAPIService(init);',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 1', 'repointed dotnet 4']);
+  });
+
+  test('an options variable set inside an if block, or spread into the call, belongs to that call', () => {
+    const go = [
+      'legacy, _ := customsearch.NewService(ctx)',
+      'var opts []option.ClientOption',
+      'if ep := os.Getenv("CSE_ROOT_URL"); ep != "" {',
+      '\topts = append(opts, option.WithEndpoint(ep))',
+      '}',
+      'svc, _ := customsearch.NewService(ctx, opts...)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 1', 'repointed go 6']);
+    const literal = ['legacy, _ := customsearch.NewService(ctx)', 'opts := []option.ClientOption{', '\toption.WithEndpoint(bridge),', '}', 'svc, _ := customsearch.NewService(ctx, opts...)'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', literal, BRIDGE)), ['needs-change go 1', 'repointed go 5']);
+    const typed = [
+      'function make(): customsearch_v1.Customsearch {',
+      "  const legacy = customsearch('v1');",
+      '  const opts = { rootUrl: BRIDGE };',
+      '  return customsearch(opts);',
+      '}',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', typed, BRIDGE)), ['needs-change node-client 2', 'repointed node-client 4']);
+    const spread = ["const legacy = customsearch('v1');", "const base = { version: 'v1', rootUrl: BRIDGE };", 'const web = customsearch({ ...base, auth: KEY });'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', spread, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
+    const kwargs = ['kwargs = {"developerKey": KEY, "client_options": {"api_endpoint": BRIDGE}}', 'service = build(', '    "customsearch",', '    "v1",', '    **kwargs,', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', kwargs, BRIDGE)), ['repointed python-client 3']);
+  });
+
+  test("C#'s target-typed new() before an Allman brace is an initializer, not a block", () => {
+    const cs = [
+      'var legacy = new CustomSearchAPIService(new BaseClientService.Initializer { ApiKey = key });',
+      'BaseClientService.Initializer init = new()',
+      '{',
+      '    ApiKey = key,',
+      '    BaseUri = BRIDGE,',
+      '};',
+      'var bridged = new CustomSearchAPIService(init);',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 1', 'repointed dotnet 7']);
+  });
+
+  test('a bracket left open in a string or regex a few lines up does not take the override', () => {
+    const tail = ['const opts = { rootUrl: BRIDGE };', 'const bridged = customsearch(opts);'];
+    const template = ["const legacy = customsearch({ version: 'v1' });", 'const msg = `searching ${q} {', '`;', ...tail].join('\n');
+    assert.deepEqual(pick(scanText('a.js', template, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 5']);
+    const regex = ["const legacy = customsearch({ version: 'v1' });", 'const OPEN = /[({]/;', ...tail].join('\n');
+    assert.deepEqual(pick(scanText('a.js', regex, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 4']);
+    const py = [
+      'legacy = build("customsearch", "v1", developerKey=KEY)',
+      '"""Search the web',
+      'through the bridge (if one is up.',
+      '"""',
+      'opts = {"api_endpoint": BRIDGE}',
+      'bridged = build("customsearch", "v1", client_options=opts)',
+    ].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1', 'repointed python-client 6']);
+  });
+
+  test('a wrapper around the call does not hide the override inside it', () => {
+    const inline = `cse = SearchClient(build("customsearch", "v1", client_options={"api_endpoint": "${BRIDGE}"}))`;
+    assert.deepEqual(pick(scanText('a.py', inline, BRIDGE)), ['repointed python-client 1']);
+    const split = ['cse = CachedSearchClient(', '    build("customsearch", "v1",', '        client_options=opts))'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', split, BRIDGE)), ['repointed python-client 2']);
   });
 
   test('an import line between the override and the call does not hide the override', () => {
@@ -330,6 +430,8 @@ describe('proximity', () => {
     assert.deepEqual(scanText('.env.example', '#CSE_URL=https://www.googleapis.com/customsearch/v1', BRIDGE), []);
     assert.deepEqual(scanText('a.sh', '#curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
     assert.deepEqual(scanText('a.md', '```\n#service = build("customsearch", "v1")\n```', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '# if you need it: curl "https://www.googleapis.com/customsearch/v1?q=x"', BRIDGE), []);
+    assert.deepEqual(scanText('a.sh', '# include the key: https://www.googleapis.com/customsearch/v1?key=K', BRIDGE), []);
   });
 
   test('clients built in less usual ways are found', () => {
@@ -353,6 +455,7 @@ describe('proximity', () => {
     const split = cell(['service = build(\n', '    "customsearch",\n', '    "v1",\n', '    developerKey=KEY)\n']);
     assert.deepEqual(pick(scanText('a.ipynb', split, BRIDGE)), ['needs-change python-client 7']);
     assert.equal(scanText('a.ipynb', split, BRIDGE)[0]!.snippet, '"customsearch",');
+    assert.deepEqual(pick(scanText('a.ipynb', cell(['\n', '\n', 'service = build("customsearch", "v1")\n']), BRIDGE)), ['needs-change python-client 8']);
     assert.deepEqual(scanText('a.ipynb', cell(['# service = build("customsearch", "v1")\n']), BRIDGE), []);
     const bridged = cell(['service = build("customsearch", "v1",\n', `    client_options={"api_endpoint": "${BRIDGE}"})\n`]);
     assert.deepEqual(pick(scanText('a.ipynb', bridged, BRIDGE)), ['repointed python-client 6']);
@@ -473,7 +576,19 @@ describe('what gets scanned', () => {
     const minified = JSON.stringify(notebook(['service = build("customsearch", "v1", developerKey=KEY)\n']));
     assert.deepEqual(pick(scanText('explore.ipynb', minified, BRIDGE)), ['needs-change python-client 1']);
     const oneString = JSON.stringify(notebook('import os\nservice = build("customsearch", "v1", developerKey=KEY)\n'), null, 1);
-    assert.deepEqual(pick(scanText('explore.ipynb', oneString, BRIDGE)).map((f) => f.replace(/ \d+$/, '')), ['needs-change python-client']);
+    assert.deepEqual(pick(scanText('explore.ipynb', oneString, BRIDGE)), ['needs-change python-client 5']);
+  });
+
+  test('a minified notebook is read cell by cell, code cells only', () => {
+    const cells = (...cells: [string, string[]][]) => JSON.stringify({ cells: cells.map(([cell_type, source]) => ({ cell_type, source, outputs: [] })) });
+    const commented = cells(['code', ['# service = build("customsearch", "v1")\n', 'x = 1  # TODO: client_options=\n']]);
+    assert.deepEqual(scanText('a.ipynb', commented, BRIDGE), []);
+    const todo = cells(['code', ['service = build("customsearch", "v1")  # TODO: client_options=\n']]);
+    assert.deepEqual(pick(scanText('a.ipynb', todo, BRIDGE)), ['needs-change python-client 1']);
+    const vertex = cells(['code', ['vertex = discoveryengine.SearchServiceClient(client_options=opts)\n']], ['code', ['cse = build("customsearch", "v1")\n']]);
+    assert.deepEqual(pick(scanText('a.ipynb', vertex, BRIDGE)), ['needs-change python-client 1']);
+    const prose = cells(['markdown', ['We call https://www.googleapis.com/customsearch/v1 with build("customsearch", "v1").\n']]);
+    assert.deepEqual(scanText('a.ipynb', prose, BRIDGE), []);
   });
 
   test('a raw URL on a line that also names the bridge is skipped, but not for a URL the bridge URL merely starts', () => {

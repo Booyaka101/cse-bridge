@@ -105,9 +105,9 @@ needs-change  raw-url        web/search.js:2
 
 It knows the Node, Python, LangChain (Python and JS), Go, Java, Ruby, PHP and .NET clients, Semantic Kernel's Google connector, and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site counts as repointed when that change is in the call itself or within 5 lines of it, as in a builder chain, an options variable the call uses, or an assignment after construction. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while any call site still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope and don't affect the exit code, since the bridge serves only the JSON API.
 
-It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. It can't tell where an override points either, so any `rootUrl`, `api_endpoint` or `client_options=` within those 5 lines counts, unless it sits in a trailing comment, on a line naming a `googleapis.com` host, or inside `google.options()` or another Google client's constructor. When two call sites share those lines, an override goes to the call it's written in, else to the call that uses the variable it's assigned to. Lines that start with a comment marker are ignored, but the inside of a docstring or a multi-line comment is still read. Treat a clean scan as a good sign rather than proof.
+It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. It can't tell where an override points either, so any `rootUrl`, `api_endpoint` or `client_options=` within those 5 lines counts, unless it sits in a trailing comment, on a line naming a `googleapis.com` host, or inside some other call, such as `google.options()` or another Google client's constructor. A setter chained onto another service's builder, or assigned to another service once it's built, still counts. When two call sites share those lines, an override goes to the call it's written in, else to the call that uses the variable it's assigned to. Lines that start with a comment marker are ignored, but the inside of a docstring or a multi-line comment is still read. Treat a clean scan as a good sign rather than proof.
 
-In a git repository it skips whatever `.gitignore` excludes, unless you name that directory on the command line. `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`, `site-packages`, `__pycache__` and the usual virtualenv and framework build directories are skipped everywhere, and so is any directory holding a `pyvenv.cfg`. So are binaries and files over 2 MB, with a warning for source files. In Markdown only fenced code blocks count, and a Jupyter notebook is read cell line by cell line.
+In a git repository it skips whatever `.gitignore` excludes, unless you name that directory on the command line. `node_modules`, `vendor`, `dist`, `build`, `target`, `coverage`, `site-packages`, `__pycache__` and the usual virtualenv and framework build directories are skipped everywhere, and so is any directory holding a `pyvenv.cfg`. So are binaries and files over 2 MB, with a warning for source files. In Markdown only fenced code blocks count, and in a Jupyter notebook only code cells do.
 
 ---
 
@@ -491,9 +491,9 @@ npm test
 ```
 
 ```
-# tests 371
+# tests 377
 # suites 57
-# pass 371
+# pass 377
 # fail 0
 ```
 

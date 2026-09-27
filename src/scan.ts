@@ -36,8 +36,6 @@ export interface Rule {
    * an OAuth scope.
    */
   override: RegExp | null;
-  /** The code up to a bracket that, enclosing an override, makes it some other client's. */
-  notIn?: RegExp;
   outOfScope?: true;
   fix: (bridgeUrl: string) => string;
 }
@@ -94,19 +92,14 @@ export const RULES: readonly Rule[] = [
     match: /(?<!\bfunction\s+)\bcustomsearch\)?\(|\bcustomsearch_v1\.Customsearch\s*\(/,
     imports: /@googleapis\/customsearch/,
     override: /\brootUrl\b/,
-    // The services ignore a rootUrl given to google.options().
-    notIn: /\bgoogle\.options\s*\($/,
     fix: (b) => `rootUrl: '${b}/'`,
   },
   {
     id: 'python-client',
     lang: 'python',
-    // The second branch is the first argument of a build( call split across lines. The
-    // backslashes are for a notebook saved as one line of JSON.
-    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?\\?["']customsearch\\?["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
+    // The second branch is the first argument of a build( call split across lines.
+    match: /\bbuild\(\s*(?:serviceName\s*=\s*)?["']customsearch["']|^\s*(?:serviceName\s*=\s*)?["']customsearch["']\s*(?:,|$)/,
     override: /\bapi_endpoint\b|\bclient_options\s*=/,
-    // Another Google client's options, such as Vertex AI Search's.
-    notIn: /Client\s*\($/,
     fix: (b) => `client_options=ClientOptions(api_endpoint="${b}")`,
   },
   {
@@ -161,7 +154,7 @@ export const RULES: readonly Rule[] = [
     imports: /\bCustomSearchAPI\b|\bGoogle_Service_Customsearch\b/,
     // The service's second argument. The client's base_path setting does not reach it, and
     // the legacy Google_Service_Customsearch class has no such argument.
-    override: /\bnew\s+[\w\\]*CustomSearchAPI\s*\([^,;]+,\s*(?!null\b)\S|\brootUrl\s*:/,
+    override: /\bnew\s+[\w\\]*CustomSearchAPI\s*\((?:[^,;()]|\([^()]*\))+,\s*(?!null\b|NULL\b)\S|\brootUrl\s*:/,
     fix: (b) => `new Google\\Service\\CustomSearchAPI($client, '${b}/')`,
   },
   {
@@ -220,7 +213,7 @@ const HASH_COMMENT: Record<string, RegExp | null> = {
   php: /^\s*#(?![!\[])/,
   ruby: /^\s*#(?![!{])/,
   python: /^\s*#(?!!)/,
-  '*': /^\s*#(?!!|\s*(?:define|undef|include|if|ifdef|ifndef|elif|else|endif|pragma|error)\b)/,
+  '*': /^\s*#(?!!|(?:define|undef|include|if|ifdef|ifndef|elif|else|endif|pragma|error)\b)/,
 };
 
 /** A comment after code on a line, by language. */
@@ -232,9 +225,12 @@ const TRAILING_COMMENT: Record<string, RegExp> = {
   '': /\s\/\//,
 };
 
-/** The line with the inside of each string literal blanked, so brackets and comment markers in strings don't count. */
+/**
+ * The line with the inside of each string literal blanked, so brackets and comment markers in
+ * strings don't count. A quote left open, as in a multi-line string, runs to the end of the line.
+ */
 function blankStrings(line: string): string {
-  return line.replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, (s) => s[0] + ' '.repeat(s.length - 2) + s[0]);
+  return line.replace(/(["'`])(?:(?!\1)[^\\]|\\.)*(?:\1|$)/g, (s) => s[0] + ' '.repeat(s.length - 1));
 }
 
 /** The line without a trailing comment, where a TODO can name an override that isn't there yet. */
@@ -253,7 +249,47 @@ interface Unit {
   lines: string[];
   /** File line number of lines[0]. */
   first: number;
+  /** File line number of each line, where they don't run on from `first`. */
+  lineNumbers?: number[];
   fenced: boolean;
+}
+
+/**
+ * A notebook's code cells, each numbered by the file lines its source strings sit on, so a
+ * minified notebook is all line 1. Undefined for a notebook that isn't valid JSON.
+ */
+function notebookCells(text: string, lang: string | undefined): Unit[] | undefined {
+  let cells: unknown;
+  try {
+    cells = (JSON.parse(text) as { cells?: unknown }).cells;
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(cells)) return undefined;
+  const units: Unit[] = [];
+  let pos = 0;
+  let lineNo = 1;
+  for (const cell of cells as { cell_type?: unknown; source?: unknown }[]) {
+    const source = typeof cell?.source === 'string' ? [cell.source] : cell?.source;
+    if (cell?.cell_type !== 'code' || !Array.isArray(source)) continue;
+    const unit: Unit = { lang, lines: [], first: lineNo, lineNumbers: [], fenced: false };
+    for (const part of source) {
+      if (typeof part !== 'string') continue;
+      // Not found where a writer escapes differently from JSON.stringify: then the line before.
+      const quoted = JSON.stringify(part);
+      const at = text.indexOf(quoted, pos);
+      if (at >= 0) {
+        for (; pos < at; pos++) if (text[pos] === '\n') lineNo++;
+        pos += quoted.length;
+      }
+      for (const line of part.replace(/\r?\n$/, '').split(/\r?\n/)) {
+        unit.lines.push(line);
+        unit.lineNumbers!.push(lineNo);
+      }
+    }
+    units.push(unit);
+  }
+  return units;
 }
 
 /** A notebook keeps each line of a cell as a JSON string on a line of its own. */
@@ -269,9 +305,15 @@ function notebookLine(line: string): string {
 
 function unitsOf(file: string, text: string): Unit[] {
   const ext = extname(file).toLowerCase();
+  const lang = LANG_OF.get(ext.slice(1));
   let lines = text.split(/\r?\n/);
-  if (ext === '.ipynb') lines = lines.map(notebookLine);
-  if (!MARKDOWN.has(ext)) return [{ lang: LANG_OF.get(ext.slice(1)), lines, first: 1, fenced: false }];
+  if (ext === '.ipynb') {
+    const cells = notebookCells(text, lang);
+    if (cells !== undefined) return cells;
+    // A merge conflict, say: read what looks like source line by line.
+    lines = lines.map(notebookLine);
+  }
+  if (!MARKDOWN.has(ext)) return [{ lang, lines, first: 1, fenced: false }];
 
   // Prose in a README names these libraries all the time; only code blocks are call sites.
   const units: Unit[] = [];
@@ -308,13 +350,17 @@ interface Bracket {
   col: number;
 }
 
-/** The brackets still open at column `col` of line `j`, innermost first, looking back WINDOW lines. */
+/**
+ * The brackets still open at column `col` of line `j`, innermost first, looking back WINDOW lines
+ * or to the end of the statement before.
+ */
 function enclosers(flat: string[], j: number, col: number): Bracket[] {
   const open: Bracket[] = [];
   let depth = 0;
   for (let i = j; i >= 0 && j - i <= WINDOW; i--) {
     const text = flat[i]!;
     for (let c = (i === j ? col : text.length) - 1; c >= 0; c--) {
+      if (depth === 0 && text[c] === ';') return open;
       if (')]}'.includes(text[c]!)) depth++;
       else if (!'([{'.includes(text[c]!)) continue;
       else if (depth > 0) depth--;
@@ -330,61 +376,68 @@ function headOf(flat: string[], b: Bracket): { line: number; text: string } {
   return text.trim() === '' && b.line > 0 ? { line: b.line - 1, text: flat[b.line - 1]! } : { line: b.line, text };
 }
 
+/**
+ * What comes before a brace that opens data: an assignment, an argument or `return`, a C#
+ * initializer's `new`, or one of those and a Go composite literal's type.
+ */
+const DATA_BRACE = /(?:[=:(,[?]|\breturn|\bnew(?:\s+[\w.<>]+)?\s*(?:\(\s*\))?)\s*$|(?:[^=!<>]=|\(|\breturn)\s*&?[\w.*[\]]+\s*$/;
+
 /** A brace opening a block of statements rather than an object literal or a C# initializer. */
 function isBlock(flat: string[], b: Bracket, head: string): boolean {
-  return flat[b.line]![b.col] === '{' && /(?:\)|=>|\w)\s*$/.test(head) && !/\bnew\s+[\w.<>]+\s*(?:\(\s*\))?\s*$/.test(head);
+  return flat[b.line]![b.col] === '{' && !DATA_BRACE.test(head);
 }
 
-/** The line where the brackets of the call on line `s` close. */
-function callEnd(flat: string[], s: number): number {
-  let depth = 0;
-  for (let i = s; i < flat.length && i - s <= WINDOW; i++) {
-    for (const ch of flat[i]!) {
-      if ('([{'.includes(ch)) depth++;
-      else if (')]}'.includes(ch)) depth--;
-    }
-    if (depth <= 0) return i;
+/**
+ * The statement holding column `col` of line `i`, out to the block it is in: the heads of the
+ * brackets around the column, innermost first, whether one of them is a call, and the site it
+ * starts on.
+ */
+function statementAt(flat: string[], sites: number[], i: number, col: number) {
+  const heads: { line: number; text: string }[] = [];
+  let inCall = false;
+  for (const b of enclosers(flat, i, col)) {
+    const head = headOf(flat, b);
+    if (isBlock(flat, b, head.text)) break;
+    heads.push(head);
+    inCall ||= flat[b.line]![b.col] === '(' && /\w\s*$/.test(head.text);
   }
-  return s + WINDOW;
+  const start = heads.at(-1)?.line ?? i;
+  return { heads, inCall, site: sites.findLast((s) => s >= start && s <= i) };
 }
 
 /**
  * The sites that an override has repointed. An override belongs to at most one site: the call
  * it is written in, else the call that uses the variable it is assigned to, else the nearest
  * site above it within WINDOW lines, as in a chained builder or an assignment after
- * construction, else the nearest below. So a "before" line does not borrow the override of
- * the "after" line next to it.
+ * construction, else the nearest below. One inside any other call, such as google.options() or
+ * another Google client's constructor, belongs to none.
  */
-function repointed(rule: Rule, lang: string | undefined, lines: string[], sites: number[]): Set<number> {
+function repointed(rule: Rule, lang: string | undefined, lines: string[], flatOf: () => string[], sites: number[]): Set<number> {
   const owners = new Set<number>();
-  if (rule.override === null) return owners;
-  let blanked: string[] | undefined;
+  if (rule.override === null || sites.length === 0) return owners;
   lines.forEach((line, j) => {
     if (!rule.override!.test(line)) return;
-    const flat = (blanked ??= lines.map((text) => blankStrings(beforeComment(text, lang))));
     const code = beforeComment(line, lang);
     const m = rule.override!.exec(code);
     if (m === null || GOOGLE_HOST.test(code)) return;
-    // The brackets of the statement the override is in.
-    const heads: { line: number; text: string }[] = [];
-    for (const b of enclosers(flat, j, m.index)) {
-      const head = headOf(flat, b);
-      if (isBlock(flat, b, head.text)) break;
-      if (rule.notIn?.test(flat[b.line]!.slice(0, b.col + 1))) return;
-      heads.push(head);
-    }
-    let owner = sites.includes(j) ? j : undefined;
-    for (const head of heads) owner ??= sites.findLast((s) => s >= head.line && s < j);
-    const name = owner === undefined ? ASSIGNMENT.exec(heads.at(-1)?.text ?? flat[j]!)?.[1] : undefined;
+    const flat = flatOf();
+    const at = statementAt(flat, sites, j, m.index);
+    let owner = at.site;
+    const heads = at.heads.length > 0 ? at.heads.map((h) => h.text).reverse() : [flat[j]!];
+    const name = owner === undefined ? heads.map((text) => ASSIGNMENT.exec(text)?.[1]).find((n) => n !== undefined) : undefined;
     if (name !== undefined) {
-      const use = new RegExp(`(?<![\\w$.])${name.replace('$', '\\$')}\\b`);
-      const k = flat.findIndex((text, i) => i > j && i - j <= WINDOW && use.test(text));
-      if (k >= 0) {
-        // Passed to something other than a call site, such as another client.
-        owner = sites.findLast((s) => s <= k && callEnd(flat, s) >= k);
-        if (owner === undefined) return;
+      // Not a property of that name, but a spread of the variable is a use.
+      const use = new RegExp(`(?<![\\w$])(?<![\\w$)\\]]\\.)${name.replace('$', '\\$')}\\b`);
+      let used = false;
+      for (let k = j + 1; k < flat.length && k - j <= WINDOW && owner === undefined; k++) {
+        const u = use.exec(flat[k]!);
+        if (u === null) continue;
+        used = true;
+        owner = statementAt(flat, sites, k, u.index).site;
       }
+      if (used && owner === undefined) return;
     }
+    if (owner === undefined && at.inCall) return;
     owner ??= sites.findLast((s) => s < j && j - s <= WINDOW) ?? sites.find((s) => s > j && s - j <= WINDOW);
     if (owner !== undefined) owners.add(owner);
   });
@@ -404,6 +457,8 @@ function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
   const hits: Hit[] = [];
   for (const unit of unitsOf(file, text)) {
     const lines = unit.lines.map((line) => codeOf(line, unit.lang));
+    let flat: string[] | undefined;
+    const flatOf = () => (flat ??= lines.map((line) => blankStrings(beforeComment(line, unit.lang))));
     RULES.forEach((rule, order) => {
       if (!applies(rule, unit.lang)) return;
       const calls: number[] = [];
@@ -414,12 +469,12 @@ function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
       });
       const viaImport = calls.length === 0;
       const sites = viaImport ? imports : calls;
-      const owners = repointed(rule, unit.lang, lines, sites);
+      const owners = repointed(rule, unit.lang, lines, flatOf, sites);
       for (const i of sites) {
         const line = lines[i]!;
         if (rule.id === 'raw-url' && bridged.test(line)) continue;
         const status: Status = rule.outOfScope ? 'out-of-scope' : owners.has(i) ? 'repointed' : 'needs-change';
-        hits.push({ rule: rule.id, lang: rule.lang, file, line: unit.first + i, status, snippet: snippetOf(line), fix: rule.fix(bridgeUrl), order, viaImport, fenced: unit.fenced });
+        hits.push({ rule: rule.id, lang: rule.lang, file, line: unit.lineNumbers?.[i] ?? unit.first + i, status, snippet: snippetOf(line), fix: rule.fix(bridgeUrl), order, viaImport, fenced: unit.fenced });
       }
     });
   }
