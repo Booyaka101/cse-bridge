@@ -636,7 +636,7 @@ describe('what gets scanned', () => {
     const google = 'https://www.googleapis.com/customsearch/v1';
     assert.deepEqual(scanText('a.js', `const u = '${google}'.replace('https://www.googleapis.com', '${BRIDGE}');`, BRIDGE), []);
     assert.deepEqual(pick(scanText('a.js', `fetch('${google}'); dev = 'http://localhost:3000';`, 'http://localhost')), ['needs-change raw-url 1']);
-    assert.deepEqual(pick(scanText('a.js', `fetch('${google}'); old = 'http://cse.example.com.old/';`, 'http://cse.example.com')), ['needs-change raw-url 1']);
+    assert.deepEqual(pick(scanText('a.js', `fetch('${google}'); old = 'http://bridge.old/';`, 'http://bridge')), ['needs-change raw-url 1']);
   });
 
   test('a long line is cut in the snippet', () => {

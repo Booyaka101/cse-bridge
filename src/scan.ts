@@ -468,7 +468,7 @@ function repointed(rule: Rule, lang: string | undefined, lines: string[], flatOf
     const name = owner === undefined ? heads.map((text) => ASSIGNMENT.exec(text)?.[1]).find((n) => n !== undefined) : undefined;
     if (name !== undefined) {
       // Not a property of that name, but a spread of the variable is a use.
-      const use = new RegExp(`(?<![\\w$])(?<![\\w$)\\]]\\.)${name.replace('$', '\\$')}\\b`);
+      const use = new RegExp(`(?<![\\w$])(?<![\\w$)\\]]\\.)${name.replaceAll('$', '\\$')}\\b`);
       let used = false;
       for (let k = j + 1; k < flat.length && k - j <= WINDOW && owner === undefined; k++) {
         const u = use.exec(flat[k]!);
