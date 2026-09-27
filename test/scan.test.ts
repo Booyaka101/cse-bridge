@@ -250,6 +250,21 @@ describe('proximity', () => {
     assert.deepEqual(pick(scanText('A.cs', cs, BRIDGE)), ['needs-change dotnet 2']);
   });
 
+  test("a sibling client's options in the same object, list or call are not an override", () => {
+    const js = ['const clients = {', "  cse: customsearch('v1'),", "  drive: google.drive({ version: 'v3', rootUrl: DRIVE }),", '};'].join('\n');
+    assert.deepEqual(pick(scanText('a.js', js, BRIDGE)), ['needs-change node-client 2']);
+    const py = ['clients = dict(', '    cse=build("customsearch", "v1", developerKey=KEY),', '    drive=build("drive", "v3", client_options=opts),', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 2']);
+    const go = ['svcs := []any{', '\tmust(customsearch.NewService(ctx)),', '\tmust(drive.NewService(ctx, option.WithEndpoint(d))),', '}'].join('\n');
+    assert.deepEqual(pick(scanText('a.go', go, BRIDGE)), ['needs-change go 2']);
+    const nested = ['service = build(', '    "customsearch", "v1",', '    client_options=ClientOptions(', '        api_endpoint=BRIDGE,', '    ),', ')'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', nested, BRIDGE)), ['repointed python-client 2']);
+    const exported = "module.exports = { legacy: customsearch('v1'), bridged: makeClient({ rootUrl }) };";
+    assert.deepEqual(pick(scanText('a.js', exported, BRIDGE)), ['needs-change node-client 1']);
+    const twice = "const legacy = customsearch('v1'), bridged = customsearch({ rootUrl: BRIDGE });";
+    assert.deepEqual(pick(scanText('a.js', twice, BRIDGE)), ['repointed node-client 1']);
+  });
+
   test('a keyword argument or initializer property is not a variable, so it stays with its own call', () => {
     const py = ['search = build(', '    "customsearch", "v1",', '    client_options=opts,', ')', 'images = build("customsearch", "v1", client_options=opts)'].join('\n');
     assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['repointed python-client 2', 'repointed python-client 5']);
@@ -276,6 +291,8 @@ describe('proximity', () => {
     assert.deepEqual(pick(scanText('a.ts', typed, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 3']);
     const split = ["const legacy = customsearch({ version: 'v1' });", 'const opts = {', "  version: 'v1',", '  rootUrl: BRIDGE,', '};', 'const bridged = customsearch(opts);'].join('\n');
     assert.deepEqual(pick(scanText('a.ts', split, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 6']);
+    const oneLine = ["const legacy = customsearch('v1'); const opts = {", '  rootUrl: BRIDGE,', '};', 'const bridged = customsearch(opts);'].join('\n');
+    assert.deepEqual(pick(scanText('a.ts', oneLine, BRIDGE)), ['needs-change node-client 1', 'repointed node-client 4']);
   });
 
   test("PHP's root URL is a second argument of the constructor itself, and not null", () => {
@@ -365,6 +382,10 @@ describe('proximity', () => {
       'bridged = build("customsearch", "v1", client_options=opts)',
     ].join('\n');
     assert.deepEqual(pick(scanText('a.py', py, BRIDGE)), ['needs-change python-client 1', 'repointed python-client 6']);
+    const langchain = ['search = GoogleSearchAPIWrapper()', '"""Calls build (see the docs', '"""', 'search.search_engine = engine'].join('\n');
+    assert.deepEqual(pick(scanText('a.py', langchain, BRIDGE)), ['repointed langchain 1']);
+    const ruby = ['service = Google::Apis::CustomsearchV1::CustomSearchAPIService.new', 'msg = <<~TXT', '  Search (beta', 'TXT', 'service.root_url = BRIDGE'].join('\n');
+    assert.deepEqual(pick(scanText('a.rb', ruby, BRIDGE)), ['repointed ruby 1']);
   });
 
   test('a wrapper around the call does not hide the override inside it', () => {
@@ -577,6 +598,26 @@ describe('what gets scanned', () => {
     assert.deepEqual(pick(scanText('explore.ipynb', minified, BRIDGE)), ['needs-change python-client 1']);
     const oneString = JSON.stringify(notebook('import os\nservice = build("customsearch", "v1", developerKey=KEY)\n'), null, 1);
     assert.deepEqual(pick(scanText('explore.ipynb', oneString, BRIDGE)), ['needs-change python-client 5']);
+  });
+
+  test('a notebook line is numbered where its own cell has it, not where a Markdown cell or output repeats it', () => {
+    const line = 'service = build("customsearch", "v1")\n';
+    const pretty = (cells: object[]) => JSON.stringify({ cells, metadata: {}, nbformat: 4 }, null, 1);
+    const at = (text: string) => text.split('\n').findLastIndex((l) => l.includes('build(')) + 1;
+    const quoted = pretty([{ cell_type: 'markdown', source: ['Run this:\n', line] }, { cell_type: 'code', outputs: [], source: [line] }]);
+    assert.deepEqual(pick(scanText('a.ipynb', quoted, BRIDGE)), [`needs-change python-client ${at(quoted)}`]);
+    // Jupyter sorts the keys, so a cell's outputs come before its source.
+    const output = pretty([{ cell_type: 'code', outputs: [{ output_type: 'stream', text: [line] }], source: [line] }]);
+    assert.deepEqual(pick(scanText('a.ipynb', output, BRIDGE)), [`needs-change python-client ${at(output)}`]);
+    // Python's json.dump writes é for é.
+    const ascii = pretty([{ cell_type: 'code', outputs: [], source: ['q = "café"\n', `q = "café"; ${line}`] }]).replaceAll('é', '\\u00e9');
+    assert.deepEqual(pick(scanText('a.ipynb', ascii, BRIDGE)), [`needs-change python-client ${at(ascii)}`]);
+    // nbformat 3, whose Markdown and outputs are left out too.
+    const v3 = JSON.stringify({ nbformat: 3, worksheets: [{ cells: [
+      { cell_type: 'markdown', source: ['We used to call https://www.googleapis.com/customsearch/v1\n'] },
+      { cell_type: 'code', input: [line], outputs: [{ output_type: 'stream', text: ['GET https://www.googleapis.com/customsearch/v1?q=x\n'] }] },
+    ] }] }, null, 1);
+    assert.deepEqual(pick(scanText('a.ipynb', v3, BRIDGE)), [`needs-change python-client ${at(v3)}`]);
   });
 
   test('a minified notebook is read cell by cell, code cells only', () => {

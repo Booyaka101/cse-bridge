@@ -259,35 +259,47 @@ interface Unit {
  * minified notebook is all line 1. Undefined for a notebook that isn't valid JSON.
  */
 function notebookCells(text: string, lang: string | undefined): Unit[] | undefined {
-  let cells: unknown;
+  let nb: { cells?: unknown; worksheets?: { cells?: unknown }[] } | null;
   try {
-    cells = (JSON.parse(text) as { cells?: unknown }).cells;
+    nb = JSON.parse(text) as typeof nb;
   } catch {
     return undefined;
   }
+  // nbformat 3 keeps the cells in worksheets, and a code cell's source in input.
+  const cells = nb?.cells ?? (Array.isArray(nb?.worksheets) ? nb.worksheets.flatMap((w) => w?.cells ?? []) : undefined);
   if (!Array.isArray(cells)) return undefined;
   const units: Unit[] = [];
+  const key = /"(?:source|input)"\s*:/g;
   let pos = 0;
   let lineNo = 1;
-  for (const cell of cells as { cell_type?: unknown; source?: unknown }[]) {
-    const source = typeof cell?.source === 'string' ? [cell.source] : cell?.source;
-    if (cell?.cell_type !== 'code' || !Array.isArray(source)) continue;
+  const moveTo = (at: number) => {
+    for (; pos < at; pos++) if (text[pos] === '\n') lineNo++;
+  };
+  for (const cell of cells as { cell_type?: unknown; source?: unknown; input?: unknown }[]) {
+    const raw = cell?.source ?? cell?.input;
+    const source = typeof raw === 'string' ? [raw] : raw;
+    if (!Array.isArray(source)) continue;
+    // Every cell moves the cursor, since a Markdown cell or an output can hold the same text.
+    key.lastIndex = pos;
+    const k = key.exec(text);
+    if (k !== null) moveTo(k.index);
     const unit: Unit = { lang, lines: [], first: lineNo, lineNumbers: [], fenced: false };
     for (const part of source) {
       if (typeof part !== 'string') continue;
-      // Not found where a writer escapes differently from JSON.stringify: then the line before.
+      // Python's json module escapes everything past ASCII. Not found at all: the line before.
       const quoted = JSON.stringify(part);
-      const at = text.indexOf(quoted, pos);
-      if (at >= 0) {
-        for (; pos < at; pos++) if (text[pos] === '\n') lineNo++;
-        pos += quoted.length;
+      const ascii = quoted.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+      const found = [quoted, ascii].map((q) => ({ at: text.indexOf(q, pos), length: q.length })).find((f) => f.at >= 0);
+      if (found !== undefined) {
+        moveTo(found.at);
+        pos += found.length;
       }
       for (const line of part.replace(/\r?\n$/, '').split(/\r?\n/)) {
         unit.lines.push(line);
         unit.lineNumbers!.push(lineNo);
       }
     }
-    units.push(unit);
+    if (cell.cell_type === 'code') units.push(unit);
   }
   return units;
 }
@@ -370,10 +382,13 @@ function enclosers(flat: string[], j: number, col: number): Bracket[] {
   return open;
 }
 
-/** The line a bracket's statement starts on, and its text up to the bracket. An Allman brace's is the line above. */
+/**
+ * The line a bracket's statement starts on, and its text up to the bracket, after any statement
+ * ended earlier on the line. An Allman brace's is the line above.
+ */
 function headOf(flat: string[], b: Bracket): { line: number; text: string } {
   const text = flat[b.line]!.slice(0, b.col);
-  return text.trim() === '' && b.line > 0 ? { line: b.line - 1, text: flat[b.line - 1]! } : { line: b.line, text };
+  return text.trim() === '' && b.line > 0 ? { line: b.line - 1, text: flat[b.line - 1]! } : { line: b.line, text: text.slice(text.lastIndexOf(';') + 1) };
 }
 
 /**
@@ -388,21 +403,45 @@ function isBlock(flat: string[], b: Bracket, head: string): boolean {
 }
 
 /**
- * The statement holding column `col` of line `i`, out to the block it is in: the heads of the
- * brackets around the column, innermost first, whether one of them is a call, and the site it
- * starts on.
+ * The bracket each site's call opens, keyed `line:col`. A site without one, such as Python's
+ * "customsearch" on a line of its own, is an argument of the bracket it sits in.
  */
-function statementAt(flat: string[], sites: number[], i: number, col: number) {
+function siteCalls(rule: Rule, lines: string[], flat: string[], sites: number[]): Map<string, number> {
+  const calls = new Map<string, number>();
+  const every = new RegExp(rule.match.source, 'g');
+  for (const s of sites) {
+    for (const m of lines[s]!.matchAll(every)) {
+      const end = m.index + m[0].length;
+      const paren = m[0].includes('(') ? m.index + m[0].lastIndexOf('(') : /^\s*\(/.test(flat[s]!.slice(end)) ? flat[s]!.indexOf('(', end) : -1;
+      const b = paren >= 0 ? { line: s, col: paren } : enclosers(flat, s, m.index)[0];
+      if (b !== undefined) calls.set(`${b.line}:${b.col}`, s);
+    }
+  }
+  return calls;
+}
+
+/** `service.root_url = ...` starts a statement, even where a stray bracket above seems open. */
+const MEMBER_ASSIGNMENT = /^\s*[\w$]+(?:\.[\w$]+)+\s*=(?!=)/;
+
+/**
+ * The statement holding column `col` of line `i`, out to the block it is in: the heads of the
+ * brackets around the column, innermost first, whether one of them is a call, and the site whose
+ * call it is in.
+ */
+function statementAt(flat: string[], calls: Map<string, number>, i: number, col: number) {
   const heads: { line: number; text: string }[] = [];
   let inCall = false;
+  let site: number | undefined;
+  const own = MEMBER_ASSIGNMENT.test(flat[i]!);
   for (const b of enclosers(flat, i, col)) {
+    if (own && b.line < i) break;
     const head = headOf(flat, b);
     if (isBlock(flat, b, head.text)) break;
     heads.push(head);
     inCall ||= flat[b.line]![b.col] === '(' && /\w\s*$/.test(head.text);
+    site ??= calls.get(`${b.line}:${b.col}`);
   }
-  const start = heads.at(-1)?.line ?? i;
-  return { heads, inCall, site: sites.findLast((s) => s >= start && s <= i) };
+  return { heads, inCall, site };
 }
 
 /**
@@ -415,13 +454,15 @@ function statementAt(flat: string[], sites: number[], i: number, col: number) {
 function repointed(rule: Rule, lang: string | undefined, lines: string[], flatOf: () => string[], sites: number[]): Set<number> {
   const owners = new Set<number>();
   if (rule.override === null || sites.length === 0) return owners;
+  let calls: Map<string, number> | undefined;
   lines.forEach((line, j) => {
     if (!rule.override!.test(line)) return;
     const code = beforeComment(line, lang);
     const m = rule.override!.exec(code);
     if (m === null || GOOGLE_HOST.test(code)) return;
     const flat = flatOf();
-    const at = statementAt(flat, sites, j, m.index);
+    calls ??= siteCalls(rule, lines, flat, sites);
+    const at = statementAt(flat, calls, j, m.index);
     let owner = at.site;
     const heads = at.heads.length > 0 ? at.heads.map((h) => h.text).reverse() : [flat[j]!];
     const name = owner === undefined ? heads.map((text) => ASSIGNMENT.exec(text)?.[1]).find((n) => n !== undefined) : undefined;
@@ -433,12 +474,12 @@ function repointed(rule: Rule, lang: string | undefined, lines: string[], flatOf
         const u = use.exec(flat[k]!);
         if (u === null) continue;
         used = true;
-        owner = statementAt(flat, sites, k, u.index).site;
+        owner = statementAt(flat, calls, k, u.index).site;
       }
       if (used && owner === undefined) return;
     }
     if (owner === undefined && at.inCall) return;
-    owner ??= sites.findLast((s) => s < j && j - s <= WINDOW) ?? sites.find((s) => s > j && s - j <= WINDOW);
+    owner ??= sites.findLast((s) => s <= j && j - s <= WINDOW) ?? sites.find((s) => s > j && s - j <= WINDOW);
     if (owner !== undefined) owners.add(owner);
   });
   return owners;
