@@ -4,7 +4,7 @@ Google's Custom Search JSON API is [closed to new customers, and existing custom
 
 This document is the per-client recipe for pointing existing code at `cse-bridge` instead. In every case the change is **the endpoint, and nothing else**.
 
-To see which of these recipes your code needs, and where, run `npx cse-bridge@latest scan .` in your project. It lists every call site it recognises, marks the ones already repointed, and prints the change from this page under each one that isn't. It exits 1 while anything is left, so it also works as a CI check once you're done.
+To see which of these recipes your code needs, and where, run `npx cse-bridge@latest scan .` in your project. It lists every call site it recognises, marks the ones already repointed, and prints the change from this page under each one that isn't. It exits 1 while any call site still needs a change, so it also works as a CI check once you're done.
 
 Assumptions below: the bridge is on `http://localhost:8080` and `CSE_BRIDGE_KEYS` is unset, so any `key` value is accepted. Substitute your own host and key as needed.
 
@@ -354,6 +354,7 @@ Go through this list against your own code — these are the places a drop-in sw
 | `sort` | Several sort expressions | Only `date` / `date:a` / `date:d` act | Others are accepted, then ignored. |
 | Rate limits | 100 free queries/day, then paid | Whatever your SearXNG and its upstream engines tolerate | You now own this. |
 | Site-restricted `cx` | Searched Google's index of just those sites | Asks general engines, keeps only on-list results (v1.3.0+) | A narrow or long site list returns fewer results than it did on Google. |
+| `/customsearch/v1/siterestrict` | Shut down in January 2025 | Served, same as `/customsearch/v1` (v1.4.0+) | Code still calling `cse.siterestrict.list` works again after the usual repoint. |
 | `promotions`, `context` | Present for some PSEs | Absent | Rarely used. |
 
 ### Two shapes to verify in your own code

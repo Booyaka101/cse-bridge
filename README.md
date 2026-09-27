@@ -87,7 +87,7 @@ That is a real, unedited response from the stack above. Real results, from real 
 
 ## Find your call sites
 
-Before changing anything, list what there is to change. In your project's root:
+Before changing anything, list what there is to change. In your project's root, with Node 22 or newer:
 
 ```bash
 npx cse-bridge@latest scan .
@@ -103,9 +103,11 @@ needs-change  raw-url        web/search.js:2
 3 call sites: 2 need a change, 1 already repointed, 0 out of scope
 ```
 
-It knows the Node, Python, LangChain, Go, Java, Ruby and PHP clients and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site with that change within 5 lines counts as repointed. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while anything still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope, since the bridge serves only the JSON API. Calls to `cse.siterestrict.list` need a change of their own, since the bridge has no such endpoint: call `cse.list` and restrict sites in the cx profile.
+It knows the Node, Python, LangChain, Go, Java, Ruby and PHP clients and raw `googleapis.com/customsearch` URLs, and under each call site that still goes to Google it prints the one change from the [migration guide](docs/migrating-from-google-cse.md). A call site with that change within 5 lines counts as repointed. Pass `--bridge-url https://search.internal` if the bridge won't be on `localhost:8080`, and `--json` for a machine-readable report. It exits 1 while any call site still needs a change, so it can gate CI. Pages that embed Google's search widget (`cse.js`, `<gcse:search>`) are listed as out of scope and don't affect the exit code, since the bridge serves only the JSON API.
 
-It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. Treat a clean scan as a good sign rather than proof. `node_modules`, `vendor`, `dist`, `build`, `target`, virtualenvs, binaries and files over 2 MB are skipped, and in Markdown only fenced code blocks count.
+It reads code line by line. A URL assembled from parts won't be found, and an endpoint set more than 5 lines from the constructor (in a shared options object, say) shows as needs-change when it isn't. It can't tell where an override points either, so any `rootUrl`, `api_endpoint` or `client_options=` within those 5 lines counts. Lines that start with a comment marker are ignored, but the inside of a docstring or a multi-line comment is still read. Treat a clean scan as a good sign rather than proof.
+
+In a git repository it skips whatever `.gitignore` excludes, unless you name that directory on the command line. `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv` and `venv` are skipped everywhere, and so are binaries and files over 2 MB, with a warning for source files. In Markdown only fenced code blocks count.
 
 ---
 
@@ -266,6 +268,7 @@ A client's `siteSearch` can narrow a cx but not widen it. `siteSearch=x` searche
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /customsearch/v1` | The Google-shaped search endpoint. |
+| `GET /customsearch/v1/siterestrict` | The same, for code written against Google's Site Restricted API, which stopped serving in January 2025. |
 | `GET /healthz` | Liveness plus backend reachability. |
 | `GET /healthz?deep=1` | Also runs a real query, proving `format=json` is enabled. |
 
@@ -487,9 +490,9 @@ npm test
 ```
 
 ```
-# tests 343
+# tests 353
 # suites 57
-# pass 343
+# pass 353
 # fail 0
 ```
 

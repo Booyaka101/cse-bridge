@@ -1,5 +1,5 @@
 /**
- * HTTP surface: GET /customsearch/v1 and GET /healthz.
+ * HTTP surface: GET /customsearch/v1 (also as /customsearch/v1/siterestrict) and GET /healthz.
  *
  * Everything that leaves this module is either a `customsearch#search` body or
  * a Google API error envelope, because clients parse both and nothing else.
@@ -15,6 +15,8 @@ import { builtinProfiles, loadProfiles, type ProfileSet } from './profiles.ts';
 import { loadConfig, type Config } from './config.ts';
 
 export const SEARCH_PATH = '/customsearch/v1';
+/** Google's cse.siterestrict.list, shut down in January 2025. It took the same parameters and returned the same body. */
+export const SITE_RESTRICT_PATH = '/customsearch/v1/siterestrict';
 export const HEALTH_PATH = '/healthz';
 /** Set to `filter-only` when a cx's site list was too long to send as `site:` operators. */
 export const SITE_MODE_HEADER = 'x-cse-bridge-site-mode';
@@ -215,14 +217,14 @@ export function createBridge(opts: BridgeOptions): Bridge {
       return;
     }
 
-    if (url.pathname !== SEARCH_PATH) {
+    if (url.pathname !== SEARCH_PATH && url.pathname !== SITE_RESTRICT_PATH) {
       sendError(res, notFound(`No endpoint at ${url.pathname}. This bridge serves ${SEARCH_PATH} and ${HEALTH_PATH}.`));
       finish(404);
       return;
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      sendError(res, notFound(`Method ${req.method} is not supported on ${SEARCH_PATH}.`));
+      sendError(res, notFound(`Method ${req.method} is not supported on ${url.pathname}.`));
       finish(404);
       return;
     }

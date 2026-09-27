@@ -32,6 +32,8 @@ USAGE
 
 ENDPOINTS
   GET /customsearch/v1            Google customsearch#search wire format
+  GET /customsearch/v1/siterestrict
+                                  the same, for the retired Site Restricted API
   GET /healthz                    liveness + backend reachability
 
 ENVIRONMENT
@@ -81,7 +83,6 @@ async function loadDist(name) {
   }
 }
 
-// Subcommand name -> the function its dist module exports.
 const SUBCOMMANDS = { import: 'runImport', scan: 'runScan' };
 
 async function main() {

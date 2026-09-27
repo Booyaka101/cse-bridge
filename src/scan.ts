@@ -3,13 +3,15 @@
  * Search JSON API, and for each one say whether it already points somewhere
  * else and, if not, the one change that points it at the bridge.
  *
- * Line-based on purpose. Every recipe in docs/migrating-from-google-cse.md is
- * an override within a few lines of where the client is built, so a regex for
- * the construction and one for the override are enough.
+ * Line-based: every recipe in docs/migrating-from-google-cse.md is an override
+ * within a few lines of where the client is built, so a regex for the
+ * construction and one for the override are enough.
  */
 
+import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, relative, resolve, sep } from 'node:path';
+import { parseCommand } from './cli.ts';
 import { ConfigError, parseUrl } from './config.ts';
 import type { ImportIo } from './import.ts';
 import { VERSION } from './server.ts';
@@ -24,12 +26,14 @@ export interface Rule {
   match: RegExp;
   /**
    * A line that only names the library, such as an import. These count only
-   * when the whole scan finds no `match` line for the rule, since most files
+   * when no code in the scan has a `match` line for the rule, since most files
    * that import a client just use its types.
    */
   imports?: RegExp;
   /** Seen within WINDOW lines of a call site, the client has already been pointed elsewhere. */
   override: RegExp | null;
+  /** The override is usually written before the call rather than inside or after it. */
+  overrideFirst?: true;
   outOfScope?: true;
   fix: (bridgeUrl: string) => string;
 }
@@ -73,24 +77,17 @@ export const RULES: readonly Rule[] = [
     id: 'raw-url',
     lang: 'http',
     // Not the OpenSearch template every response carries in url.template, the
-    // bridge's included, which would flag every recorded response forever.
+    // bridge's included, which would flag every recorded response.
     match: /googleapis\.com\/customsearch\/v1(?!\?q=\{searchTerms\})|customsearch\.googleapis\.com/,
     override: null,
     fix: (b) => `swap the host: ${b}/customsearch/v1`,
   },
   {
-    id: 'siterestrict',
-    lang: 'http',
-    // cse.siterestrict.list in each generated client's naming, the raw path, and LangChain's flag.
-    match: /customsearch\/v1\/siterestrict|\.siterestrict\s*(?:\(\s*\)|\.list\b)|\.Siterestrict\.List\b|_siterestricts?\b|\bsiterestrict\s*=\s*True\b/,
-    override: null,
-    fix: () => 'the bridge has no siterestrict endpoint: call cse.list, and restrict sites in the cx profile',
-  },
-  {
     id: 'node-client',
     lang: 'node',
-    // `customsearch)(` is the call TypeScript's CommonJS output makes.
-    match: /\bcustomsearch\)?\(/,
+    // `customsearch)(` is the call TypeScript's CommonJS output makes. The class is what
+    // the factory returns, and some code builds it directly.
+    match: /\bcustomsearch\)?\(|\bcustomsearch_v1\.Customsearch\s*\(/,
     imports: /@googleapis\/customsearch/,
     override: /\brootUrl\b/,
     fix: (b) => `rootUrl: '${b}/'`,
@@ -146,7 +143,9 @@ export const RULES: readonly Rule[] = [
     lang: 'php',
     match: /\bnew\s+[\w\\]*(?:CustomSearchAPI|Google_Service_Customsearch)\s*\(/,
     imports: /\bCustomSearchAPI\b|\bGoogle_Service_Customsearch\b/,
+    // base_path goes on the client that the service is then built from.
     override: /\bbase_path\b/,
+    overrideFirst: true,
     fix: (b) => `$client->setConfig('base_path', '${b}');`,
   },
   {
@@ -173,9 +172,16 @@ for (const [lang, names] of Object.entries({
 }
 const SCOPED = new Set(LANG_OF.values());
 const MARKDOWN = new Set(['.md', '.mdx', '.markdown']);
-/** A whole-line comment, which is neither a call site nor an override. In JavaScript `#` starts a private field. */
-function isComment(line: string, lang: string | undefined): boolean {
-  return /^\s*(?:\/\/|\/\*|\*(?!\/)|<!--)/.test(line) || (lang !== 'node' && /^\s*#(?!!)/.test(line));
+
+/**
+ * The code on a line: nothing for a whole-line comment, which is neither a call site nor an
+ * override, and the rest after a leading closed block comment such as a JSDoc type.
+ */
+function codeOf(line: string, lang: string | undefined): string {
+  const code = line.replace(/^\s*(?:\/\*.*?\*\/\s*)+/, '');
+  // `#` starts a private field in JavaScript and an attribute as `#[` in PHP.
+  const hash = lang === 'node' ? undefined : lang === 'php' ? /^\s*#(?![!\[])/ : /^\s*#(?!!)/;
+  return /^\s*(?:\/\/|\/\*|\*(?=\s|$)|<!--)/.test(code) || hash?.test(code) ? '' : code;
 }
 
 /**
@@ -188,22 +194,24 @@ interface Unit {
   lines: string[];
   /** File line number of lines[0]. */
   first: number;
+  fenced: boolean;
 }
 
 function unitsOf(file: string, text: string): Unit[] {
   const lines = text.split(/\r?\n/);
   const ext = extname(file).toLowerCase();
-  if (!MARKDOWN.has(ext)) return [{ lang: LANG_OF.get(ext.slice(1)), lines, first: 1 }];
+  if (!MARKDOWN.has(ext)) return [{ lang: LANG_OF.get(ext.slice(1)), lines, first: 1, fenced: false }];
 
   // Prose in a README names these libraries all the time; only code blocks are call sites.
   const units: Unit[] = [];
   let open: { fence: string; unit: Unit } | undefined;
   lines.forEach((line, i) => {
-    const m = /^\s*(`{3,}|~{3,})\s*([^\s`{]*)/.exec(line);
+    // A backtick fence's info string cannot hold a backtick, so "```x``` is" is prose.
+    const m = /^\s*(`{3,}(?!.*`)|~{3,})\s*([^\s`{]*)/.exec(line);
     if (open === undefined) {
       if (m === null) return;
       const tag = m[2]!.toLowerCase();
-      open = { fence: m[1]!, unit: { lang: tag === '' ? '*' : LANG_OF.get(tag), lines: [], first: i + 2 } };
+      open = { fence: m[1]!, unit: { lang: tag === '' ? '*' : LANG_OF.get(tag), lines: [], first: i + 2, fenced: true } };
       units.push(open.unit);
     } else if (m !== null && m[1]![0] === open.fence[0] && m[1]!.length >= open.fence.length && m[2] === '') {
       open = undefined;
@@ -219,19 +227,22 @@ function applies(rule: Rule, lang: string | undefined): boolean {
 }
 
 /**
- * Looks outward from a call site for the override, up to WINDOW lines each way
- * and never past another call site of the same rule, so a "before" line does
- * not borrow the override from the "after" line next to it.
+ * The sites that an override has repointed. Each override line belongs to one site
+ * within WINDOW lines: the nearest at or above it, as in a multi-line call or an
+ * assignment after construction, or else the nearest below. So a "before" line does not
+ * borrow the override of the "after" line next to it, nor the next call its predecessor's.
  */
-function isRepointed(rule: Rule, lines: string[], at: number, sites: Set<number>): boolean {
-  if (rule.override === null) return false;
-  if (rule.override.test(lines[at]!)) return true;
-  for (const step of [-1, 1]) {
-    for (let j = at + step; Math.abs(j - at) <= WINDOW && j >= 0 && j < lines.length && !sites.has(j); j += step) {
-      if (rule.override.test(lines[j]!)) return true;
-    }
-  }
-  return false;
+function repointed(rule: Rule, lines: string[], sites: number[]): Set<number> {
+  const owners = new Set<number>();
+  if (rule.override === null) return owners;
+  lines.forEach((line, j) => {
+    if (!rule.override!.test(line)) return;
+    const above = sites.findLast((s) => s <= j && j - s <= WINDOW);
+    const below = sites.find((s) => s >= j && s - j <= WINDOW);
+    const owner = rule.overrideFirst ? (below ?? above) : (above ?? below);
+    if (owner !== undefined) owners.add(owner);
+  });
+  return owners;
 }
 
 function snippetOf(line: string): string {
@@ -239,39 +250,43 @@ function snippetOf(line: string): string {
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX)}...` : text;
 }
 
-type Hit = Finding & { order: number; viaImport: boolean };
+type Hit = Finding & { order: number; viaImport: boolean; fenced: boolean };
 
 function hitsIn(file: string, text: string, bridgeUrl: string): Hit[] {
+  // Not a longer host or another port that merely starts with the bridge URL.
+  const bridged = new RegExp(`${bridgeUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.:-])`);
   const hits: Hit[] = [];
   for (const unit of unitsOf(file, text)) {
-    const lines = unit.lines.map((line) => (isComment(line, unit.lang) ? '' : line));
+    const lines = unit.lines.map((line) => codeOf(line, unit.lang));
     RULES.forEach((rule, order) => {
       if (!applies(rule, unit.lang)) return;
-      const sites = new Map<number, boolean>();
+      const calls: number[] = [];
+      const imports: number[] = [];
       lines.forEach((line, i) => {
-        if (rule.match.test(line)) sites.set(i, false);
-        else if (rule.imports?.test(line)) sites.set(i, true);
+        if (rule.match.test(line)) calls.push(i);
+        else if (rule.imports?.test(line)) imports.push(i);
       });
-      const at = new Set(sites.keys());
-      for (const [i, viaImport] of sites) {
+      const viaImport = calls.length === 0;
+      const sites = viaImport ? imports : calls;
+      const owners = repointed(rule, lines, sites);
+      for (const i of sites) {
         const line = lines[i]!;
-        if (rule.id === 'raw-url' && line.includes(bridgeUrl)) continue;
-        const status: Status = rule.outOfScope
-          ? 'out-of-scope'
-          : isRepointed(rule, lines, i, at)
-            ? 'repointed'
-            : 'needs-change';
-        hits.push({ rule: rule.id, lang: rule.lang, file, line: unit.first + i, status, snippet: snippetOf(line), fix: rule.fix(bridgeUrl), order, viaImport });
+        if (rule.id === 'raw-url' && bridged.test(line)) continue;
+        const status: Status = rule.outOfScope ? 'out-of-scope' : owners.has(i) ? 'repointed' : 'needs-change';
+        hits.push({ rule: rule.id, lang: rule.lang, file, line: unit.first + i, status, snippet: snippetOf(line), fix: rule.fix(bridgeUrl), order, viaImport, fenced: unit.fenced });
       }
     });
   }
   return hits.sort((a, b) => a.line - b.line || a.order - b.order);
 }
 
-/** Drops the import lines of any rule that has a real call site among `hits`. */
+/**
+ * Drops the import lines of any rule that some code among `hits` builds. A Markdown
+ * example building one does not count, since it builds nothing in the project.
+ */
 function settle(hits: Hit[]): Finding[] {
-  const built = new Set(hits.filter((h) => !h.viaImport).map((h) => h.rule));
-  return hits.filter((h) => !(h.viaImport && built.has(h.rule))).map(({ order: _o, viaImport: _v, ...finding }) => finding);
+  const built = new Set(hits.filter((h) => !h.viaImport && !h.fenced).map((h) => h.rule));
+  return hits.filter((h) => !(h.viaImport && built.has(h.rule))).map(({ order: _o, viaImport: _v, fenced: _f, ...finding }) => finding);
 }
 
 /** Findings for one file's text. `file` is the path reported, and its extension picks the language. */
@@ -286,14 +301,26 @@ interface Walk {
   warnings: string[];
 }
 
-function walk(path: string, seen: Set<string>, out: Walk): void {
+/**
+ * The files git shows under `dir`, tracked or untracked but not ignored, relative to it.
+ * Undefined outside a work tree, without git, or when `dir` is itself ignored, since a
+ * directory named on the command line is scanned whatever .gitignore says.
+ */
+function gitFiles(dir: string): string[] | undefined {
+  const git = (...args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 1 << 28 });
+  if (git('check-ignore', '-q', '.').status !== 1) return undefined;
+  const listed = git('ls-files', '-z', '--cached', '--others', '--exclude-standard');
+  return listed.status === 0 ? listed.stdout.split('\0').filter(Boolean).sort() : undefined;
+}
+
+function walk(path: string, seen: Set<string>, out: Walk, named = false): void {
   let real: string;
   let stats;
   try {
     real = realpathSync(path);
     stats = statSync(real);
   } catch (err) {
-    // A dangling symlink is not worth a warning.
+    // A dangling symlink, or a file deleted but still in git's index, is not worth a warning.
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') out.warnings.push(`${path}: ${(err as Error).message}`);
     return;
   }
@@ -312,18 +339,23 @@ function walk(path: string, seen: Set<string>, out: Walk): void {
     out.warnings.push(`${path}: ${(err as Error).message}`);
     return;
   }
-  for (const name of names.sort()) {
-    if (SKIP_DIRS.has(name)) continue;
-    walk(resolve(path, name), seen, out);
+  // Only a named path or a repository root is worth a git call; below that git has already answered.
+  const listed = named || names.includes('.git') ? gitFiles(path) : undefined;
+  const children = listed ?? names.sort();
+  for (const child of children) {
+    if (child.split('/').some((part) => SKIP_DIRS.has(part))) continue;
+    walk(resolve(path, child), seen, out);
   }
 }
 
 const slashed = (path: string) => path.split(sep).join('/');
 
-/** Undefined for a file that is too big or binary, which the scan skips. */
+/** Undefined for a binary file, which the scan skips. */
 function readText(file: string): string | undefined {
-  if (statSync(file).size > MAX_FILE_BYTES) return undefined;
   const bytes = readFileSync(file);
+  // Windows PowerShell 5.1 writes UTF-16 with a byte order mark by default.
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes);
   if (bytes.subarray(0, SNIFF_BYTES).includes(0)) return undefined;
   return bytes.toString('utf8');
 }
@@ -341,7 +373,7 @@ export function scan(paths: string[], cwd: string, bridgeUrl: string): ScanResul
   });
   const out: Walk = { files: [], warnings: [] };
   const seen = new Set<string>();
-  for (const { path } of absolute) walk(path, seen, out);
+  for (const { path } of absolute) walk(path, seen, out, true);
 
   let root = cwd;
   if (absolute.length === 1) root = absolute[0]!.isFile ? dirname(absolute[0]!.path) : absolute[0]!.path;
@@ -351,6 +383,11 @@ export function scan(paths: string[], cwd: string, bridgeUrl: string): ScanResul
   for (const file of out.files) {
     let text: string | undefined;
     try {
+      if (statSync(file).size > MAX_FILE_BYTES) {
+        // Big images and data files are routine; big source is worth knowing about.
+        if (LANG_OF.has(extname(file).slice(1).toLowerCase())) out.warnings.push(`${file}: skipped, over ${MAX_FILE_BYTES / 1024 / 1024} MB`);
+        continue;
+      }
       text = readText(file);
     } catch (err) {
       out.warnings.push(`${file}: ${(err as Error).message}`);
@@ -404,29 +441,24 @@ export function formatText(findings: Finding[], summary: ScanSummary): string {
 
 export const SCAN_USAGE = `usage: cse-bridge scan [path...] [--json] [--bridge-url URL]
 
-  Lists every place the code under each path (default: the current directory)
-  calls Google's Custom Search JSON API, whether it already points elsewhere,
+  Lists the places the code under each path (default: the current directory)
+  calls Google's Custom Search JSON API, whether each already points elsewhere,
   and the change that points it at the bridge (default ${DEFAULT_BRIDGE_URL}).
-  Exits 1 if anything still needs a change, 0 if not.
+  Exits 1 if any call site still needs a change, 2 for a bad option or a
+  missing path, and 0 otherwise.
 `;
 
 export type ScanIo = Pick<ImportIo, 'stdout' | 'stderr' | 'cwd'>;
 
 /** `cse-bridge scan ...`. Returns the process exit code. */
 export function runScan(argv: string[], io: ScanIo): number {
-  const paths: string[] = [];
-  let json = false;
-  let rawUrl: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--json') json = true;
-    else if (arg === '--bridge-url') rawUrl = argv[i + 1]?.startsWith('-') ? '' : (argv[++i] ?? '');
-    else if (arg.startsWith('--bridge-url=')) rawUrl = arg.slice('--bridge-url='.length);
-    else if (arg.startsWith('-')) {
-      io.stderr(`cse-bridge scan: unknown option ${arg}\n${SCAN_USAGE}`);
-      return 2;
-    } else paths.push(arg);
+  const args = parseCommand(argv, { json: { type: 'boolean' }, 'bridge-url': { type: 'string' } });
+  if ('problem' in args) {
+    io.stderr(`cse-bridge scan: ${args.problem}\n${SCAN_USAGE}`);
+    return 2;
   }
+  const { json, 'bridge-url': rawUrl } = args.values;
+  const paths = args.positionals;
   if (rawUrl === '') {
     io.stderr(`cse-bridge scan: --bridge-url needs a URL\n${SCAN_USAGE}`);
     return 2;

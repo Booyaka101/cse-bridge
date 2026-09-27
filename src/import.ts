@@ -15,6 +15,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
+import { parseCommand } from './cli.ts';
 import { attributesOf, TAG_BODY } from './markup.ts';
 import { parseSitePattern, parseYaml, profilesFromYaml, ProfilesError } from './profiles.ts';
 
@@ -242,19 +243,14 @@ function readInput(path: string, cwd: string): string {
 
 /** `cse-bridge import ...`. Returns the process exit code. */
 export function runImport(argv: string[], io: ImportIo): number {
-  const files: string[] = [];
-  let cx: string | undefined;
-  let write = false;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--write') write = true;
-    else if (arg === '--cx') cx = argv[i + 1]?.startsWith('-') ? '' : (argv[++i] ?? '');
-    else if (arg.startsWith('--cx=')) cx = arg.slice('--cx='.length);
-    else if (arg.startsWith('-')) {
-      io.stderr(`cse-bridge import: unknown option ${arg}\n${IMPORT_USAGE}`);
-      return 2;
-    } else files.push(arg);
+  const args = parseCommand(argv, { cx: { type: 'string' }, write: { type: 'boolean' } });
+  if ('problem' in args) {
+    io.stderr(`cse-bridge import: ${args.problem}\n${IMPORT_USAGE}`);
+    return 2;
   }
+  const files = args.positionals;
+  let { cx } = args.values;
+  const write = args.values.write ?? false;
   let problem: string | undefined;
   if (files.length === 0) problem = 'no annotations file given';
   else if (files.length > 2) problem = `too many files: ${files.join(' ')}`;

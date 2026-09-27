@@ -160,6 +160,17 @@ describe('GET /customsearch/v1 — the worked example', () => {
     const res = await fetch(`${base}/customsearch/v1?key=k&cx=default&q=test`, { method: 'HEAD' });
     assert.equal(res.status, 200);
   });
+
+  test('the retired siterestrict path answers like /customsearch/v1', async () => {
+    const query = 'key=k&cx=default&q=rust%20async%20runtime&num=3';
+    const plain = await (await fetch(`${base}/customsearch/v1?${query}`)).json();
+    const res = await fetch(`${base}/customsearch/v1/siterestrict?${query}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.kind, 'customsearch#search');
+    assert.deepEqual(body.items, plain.items);
+    assert.equal((await fetch(`${base}/customsearch/v1/siterestrict/x?${query}`)).status, 404);
+  });
 });
 
 describe('error envelopes over HTTP', () => {
